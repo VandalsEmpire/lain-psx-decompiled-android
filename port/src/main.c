@@ -1,7 +1,7 @@
 /* Lain native client entry point: launcher/setup window, then the game. */
 #include <assert.h> /* libgpu.h uses static_assert */
 #include <SDL.h>
-#ifndef _WIN32 /* POSIX crash handler (debug aid) */
+#if !defined(_WIN32) && !defined(__ANDROID__) /* POSIX crash handler (debug aid) */
 #include <execinfo.h>
 #include <signal.h>
 #include <unistd.h>
@@ -17,7 +17,11 @@
 #include "libgte.h"
 #include "libgpu.h" /* before PsyX_public.h: it uses struct _RECT16 */
 #include "PsyX/PsyX_public.h"
+#if defined(__ANDROID__)
+#include <GLES3/gl3.h>
+#else
 #include "PsyX/common/glad.h"
+#endif
 #include "libcd.h"
 #include "libspu.h" /* LainSpu_SetOutputGain: master volume */
 #include "libgs.h"
@@ -661,7 +665,7 @@ static void on_end_scene(void) {
 
 /* Prints the faulting address and a backtrace on a crash (lldb isn't always
  * usable in batch runs). Symbolize with atos -o lain -l <image base> <pc>. */
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__ANDROID__)
 #include <sys/ucontext.h>
 static void crash_handler(int sig, siginfo_t *info, void *uctx) {
     void *frames[64];
@@ -683,10 +687,10 @@ static void crash_handler(int sig, siginfo_t *info, void *uctx) {
     backtrace_symbols_fd(frames, n, 2);
     _exit(128 + sig);
 }
-#endif /* !_WIN32 */
+#endif /* POSIX crash handler; Android uses logcat/NDK diagnostics */
 
 static void debug_hooks_init(void) {
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__ANDROID__)
     struct sigaction sa;
     memset(&sa, 0, sizeof sa);
     sa.sa_sigaction = crash_handler;

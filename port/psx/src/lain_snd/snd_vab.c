@@ -1,8 +1,9 @@
+#include <stdlib.h>
+
 /* lain: libsnd initialisation, tick, master volume and VAB sound banks. */
 #include "snd_internal.h"
 #include "psx/libspu.h"
 
-#include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 

@@ -1,3 +1,5 @@
+#include <stdlib.h>
+
 /*
  * lain: libcd data streaming (St* ring buffer + CdRead2) for STR movies.
  *
@@ -38,7 +40,6 @@
 
 #include <SDL.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 #define RAW_SECTOR   2352

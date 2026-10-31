@@ -1,4 +1,5 @@
 #include "psx/libpad.h"
+#include "../platform.h"
 #include "psx/libetc.h"
 
 #include "../PsyX_main.h"

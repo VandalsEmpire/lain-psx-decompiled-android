@@ -1,59 +1,39 @@
-# Android port - implementation notes
+# Android port - first native build
 
-This directory is the Android work area. The first goal is a debug APK that can
-boot the existing native client with the player's own two disc images. The game
-must not bundle copyrighted disc data.
+This milestone adds an Android Gradle/NDK application target around the
+existing native client. It uses the existing PsyCross Android path (OpenGL ES
+3) and the SDL2 Android Activity/JNI bridge. The SDL2 2.32.10 source archive
+is downloaded on Gradle sync and SHA-256 verified; it is not copied into this
+repository.
 
-## Confirmed starting points
+## Toolchain
 
-- `port/psx/include/PsyX/PsyX_render.h` already selects the OpenGL ES 3 renderer
-  when `__ANDROID__` is defined.
-- `port/psx/src/render/PsyX_render.cpp` already has an OpenGL ES context path.
-- The client currently builds a desktop executable (`add_executable(lain ...)`)
-  and uses desktop OpenGL/ImGui setup code. This is not yet an Android app.
-- The current launcher uses native desktop file dialogs. Android needs a
-  Storage Access Framework (SAF) picker and persistent access to selected files.
-- The native settings/data directory is based on `SDL_GetPrefPath`, which is a
-  suitable starting point for app-private persistent data.
-- The SDL GameController layer already handles physical controllers. Touch
-  controls are a separate input overlay and are not implemented yet.
+- JDK 17
+- Android SDK Platform 36 and Build Tools 36.0.0
+- Android NDK 28.2.13676358
+- CMake 3.31.6
+- Gradle 9.6.0 / Android Gradle Plugin 9.5.0
 
-## Planned milestones
+Only arm64-v8a is enabled in this first device build.
 
-1. **Build target:** add an Android Gradle/NDK application target that packages
-   SDL2 and loads the port as an Android shared library. Keep desktop targets
-   unchanged.
-2. **First boot:** create an Android launcher that requests the two disc images
-   with SAF, imports them into app-private storage, and starts the game.
-3. **Graphics/audio:** validate GLES3 shader paths, framebuffer formats, audio
-   initialization and lifecycle handling (pause/resume/context recreation).
-4. **Input:** add a landscape touch overlay for D-pad, face buttons, Start and
-   Select. Keep SDL physical controllers working and allow the overlay to be
-   hidden when a controller is connected.
-5. **PT-BR:** import the separate `laingame-net/lainvtt` `pt-BR` WebVTT set as
-   the native SRT subtitle pack. The conversion helper lives in
-   `tools/import_webvtt_pack.py`.
-6. **Display polish:** preserve the original 4:3 game image first. Consider
-   true widescreen only after the Android build is stable.
+## Build
 
-## Current status
+Open this `android/` folder in Android Studio and allow Gradle sync to finish.
+The first sync downloads the pinned SDL2 release. Then build the `debug`
+variant, or run `gradle assembleDebug` from this folder with Gradle 9.6.0.
 
-This is planning/scaffolding, not an installable APK. The Gradle project and
-Android lifecycle/input bridge still need to be implemented and tested on a
-physical device.
+The APK output is `app/build/outputs/apk/debug/app-debug.apk`.
 
-## PT-BR subtitle import
+## Current scope
 
-Clone the translation repository separately, then run from the root of this
-repository:
+The app is landscape-only and builds the native client as `libmain.so` linked
+to SDL2, OpenAL Soft and GLESv3. The Android setup screen is a temporary
+launcher: it displays the app-private data directory and only enables Play
+when `disc1.bin` is present. The Android Storage Access Framework picker and
+copy/import workflow are not implemented yet. Do not expect a playable install
+until that picker is added and the app is tested on a device with the user's
+own disc images.
 
-```sh
-python3 tools/import_webvtt_pack.py \
-  --input /path/to/lainvtt/pt-BR \
-  --output /path/to/lain-user-data/lang/pt-BR
-```
-
-The output is a native pack folder containing `pack.txt` and
-`subtitles/index.txt` plus one `.srt` per source `.vtt`. Node basenames are
-preserved so native track lookup can continue to use names such as `Cou001`
-and `Lda001`.
+Touchscreen gameplay controls, pause/resume validation, PT-BR pack install
+integration and widescreen rendering remain subsequent milestones. The
+original game display remains 4:3 for now.

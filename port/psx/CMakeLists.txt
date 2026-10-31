@@ -17,25 +17,34 @@ target_include_directories(psx PUBLIC include include/psx)
 target_compile_definitions(psx PUBLIC USE_PGXP=0)
 # macOS/BSD: no <malloc.h>; PsyCross headers use static_assert without <assert.h>.
 target_include_directories(psx BEFORE PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../compat)
-target_compile_options(psx PRIVATE $<$<COMPILE_LANGUAGE:C>:-include assert.h>
-                                   $<$<COMPILE_LANGUAGE:CXX>:-Wno-c++11-narrowing>)
+target_compile_options(psx PRIVATE
+    $<$<COMPILE_LANGUAGE:C>:-include>
+    $<$<COMPILE_LANGUAGE:C>:${CMAKE_CURRENT_SOURCE_DIR}/android_preinclude.h>
+    $<$<COMPILE_LANGUAGE:CXX>:-Wno-c++11-narrowing>
+    $<$<COMPILE_LANGUAGE:CXX>:-include>
+    $<$<COMPILE_LANGUAGE:CXX>:${CMAKE_CURRENT_SOURCE_DIR}/android_preinclude_cpp.h>
+)
 
-# SDL2/OpenAL come from the system, or from LAIN_STATIC_DEPS (top-level CMakeLists).
-if(NOT TARGET SDL2::SDL2)
-    find_package(SDL2 REQUIRED)
-endif()
-find_package(OpenGL REQUIRED)
-if(NOT TARGET OpenAL::OpenAL)
-    if(APPLE)
-        # Use openal-soft (AL/al.h), not Apple's deprecated OpenAL.framework.
-        set(CMAKE_FIND_FRAMEWORK LAST)
-        find_package(OpenAL REQUIRED)
-        set(CMAKE_FIND_FRAMEWORK FIRST)
-    else()
-        find_package(OpenAL REQUIRED)
+# SDL2/OpenAL come from the system on desktop, or from source on Android.
+if(ANDROID)
+    target_link_libraries(psx PUBLIC SDL2::SDL2 OpenAL::OpenAL GLESv3 EGL android log)
+else()
+    if(NOT TARGET SDL2::SDL2)
+        find_package(SDL2 REQUIRED)
     endif()
-    # FindOpenAL points at .../include/AL; PsyCross includes <AL/al.h>.
-    get_filename_component(OPENAL_INCLUDE_PARENT "${OPENAL_INCLUDE_DIR}" DIRECTORY)
-    target_include_directories(psx PUBLIC ${OPENAL_INCLUDE_PARENT})
+    find_package(OpenGL REQUIRED)
+    if(NOT TARGET OpenAL::OpenAL)
+        if(APPLE)
+            # Use openal-soft (AL/al.h), not Apple's deprecated OpenAL.framework.
+            set(CMAKE_FIND_FRAMEWORK LAST)
+            find_package(OpenAL REQUIRED)
+            set(CMAKE_FIND_FRAMEWORK FIRST)
+        else()
+            find_package(OpenAL REQUIRED)
+        endif()
+        # FindOpenAL points at .../include/AL; PsyCross includes <AL/al.h>.
+        get_filename_component(OPENAL_INCLUDE_PARENT "${OPENAL_INCLUDE_DIR}" DIRECTORY)
+        target_include_directories(psx PUBLIC ${OPENAL_INCLUDE_PARENT})
+    endif()
+    target_link_libraries(psx PUBLIC SDL2::SDL2 OpenAL::OpenAL OpenGL::GL)
 endif()
-target_link_libraries(psx PUBLIC SDL2::SDL2 OpenAL::OpenAL OpenGL::GL)

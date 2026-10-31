@@ -378,7 +378,7 @@ int LainCD_Control(u_char com, u_char *param, u_char *result, int kind)
         break;
 
     default:
-        eprintwarn("lain_cd: unhandled CD command 0x%02X\n", com);
+        eprintwarnf("lain_cd: unhandled CD command 0x%02X\n", com);
         break;
     }
 

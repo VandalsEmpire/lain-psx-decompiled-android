@@ -57,7 +57,11 @@ static bool overlay_init(void) {
     ImGui::StyleColorsDark();
     ImGui::GetStyle().WindowRounding = 4;
     ImGui_ImplSDL2_InitForOpenGL(win, gl);
+#if defined(__ANDROID__)
+    ImGui_ImplOpenGL3_Init("#version 300 es");
+#else
     ImGui_ImplOpenGL3_Init("#version 150");
+#endif
     io.Fonts->AddFontDefault();
     s_font_dirty = true;
     return true;

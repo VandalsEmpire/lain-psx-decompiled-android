@@ -1,0 +1,12 @@
+.deps/
+.gradle/
+local.properties
+build/
+app/build/
+# Android / Gradle generated files
+/.gradle/
+/local.properties
+/app/.cxx/
+/app/.externalNativeBuild/
+/app/build/
+/captures/

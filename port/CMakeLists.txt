@@ -4,6 +4,12 @@
 cmake_minimum_required(VERSION 3.20)
 project(lain_native C CXX ASM)
 
+if(ANDROID)
+    # OpenAL: use pthread TLS instead of Android C11 tss_* APIs.
+    string(APPEND CMAKE_CXX_FLAGS " -D__STDC_NO_THREADS__=1")
+endif()
+
+
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
 if(APPLE)
@@ -17,7 +23,75 @@ set(PSX_LAIN_EXT ON CACHE BOOL "Build the Lain additions (src/lain_*)" FORCE)
 # the executable needs no system libraries (and sdl2-compat's run-time SDL3
 # lookup never happens). Development builds use the system packages.
 option(LAIN_STATIC_DEPS "Build SDL2 and openal-soft from source as static libraries" OFF)
-if(LAIN_STATIC_DEPS)
+if(ANDROID)
+    include(FetchContent)
+
+    # SDL2's Android CMake project also supplies SDL2main with the JNI entry point.
+    set(SDL_SHARED ON CACHE BOOL "" FORCE)
+    set(SDL_STATIC OFF CACHE BOOL "" FORCE)
+    set(SDL_TEST OFF CACHE BOOL "" FORCE)
+    set(SDL_TESTS OFF CACHE BOOL "" FORCE)
+    set(SDL2_DISABLE_INSTALL ON CACHE BOOL "" FORCE)
+    set(SDL2_DISABLE_UNINSTALL ON CACHE BOOL "" FORCE)
+    set(SDL_OPENGL OFF CACHE BOOL "" FORCE)
+    set(SDL_OPENGLES ON CACHE BOOL "" FORCE)
+    add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/../android/.deps/SDL2-2.32.10" "${CMAKE_BINARY_DIR}/SDL2")
+
+    # Build OpenAL Soft for Android; its OpenSL ES/AAudio backends stay enabled.
+    set(LIBTYPE STATIC CACHE STRING "" FORCE)
+    foreach(opt ALSOFT_UTILS ALSOFT_EXAMPLES ALSOFT_TESTS ALSOFT_INSTALL
+                ALSOFT_INSTALL_CONFIG ALSOFT_INSTALL_HRTF_DATA
+                ALSOFT_INSTALL_AMBDEC_PRESETS ALSOFT_INSTALL_EXAMPLES
+                ALSOFT_INSTALL_UTILS ALSOFT_BACKEND_ALSA ALSOFT_BACKEND_OSS
+                ALSOFT_BACKEND_PIPEWIRE ALSOFT_BACKEND_PULSEAUDIO
+                ALSOFT_BACKEND_JACK ALSOFT_BACKEND_PORTAUDIO
+                ALSOFT_BACKEND_SNDIO ALSOFT_BACKEND_DSOUND
+                ALSOFT_BACKEND_WINMM ALSOFT_BACKEND_WAVE)
+        set(${opt} OFF CACHE BOOL "" FORCE)
+    endforeach()
+    FetchContent_Declare(openal
+        URL https://github.com/kcat/openal-soft/archive/refs/tags/1.25.2.tar.gz
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+    FetchContent_MakeAvailable(openal)
+    # LAIN OpenAL Android compatibility patch
+    # Keep this fix in source control; do not rely on the local .cxx cache.
+    set(_lain_openal_auxeffectslot "${openal_SOURCE_DIR}/al/auxeffectslot.cpp")
+    if(NOT EXISTS "${_lain_openal_auxeffectslot}")
+          message(FATAL_ERROR "OpenAL auxeffectslot.cpp was not found")
+    endif()
+    file(READ "${_lain_openal_auxeffectslot}" _lain_openal_auxeffectslot_text)
+    set(_lain_openal_ranges_fill
+          "std::ranges::fill(*newarray | std::views::drop(newcount), nullptr);")
+    set(_lain_openal_iterator_fill
+          "std::fill(std::next(newarray->begin(), as_signed(newcount)), newarray->end(), nullptr);")
+    string(FIND "${_lain_openal_auxeffectslot_text}"
+          "${_lain_openal_ranges_fill}" _lain_openal_old_fill_pos)
+    if(_lain_openal_old_fill_pos GREATER_EQUAL 0)
+          string(REPLACE
+            "${_lain_openal_ranges_fill}"
+            "${_lain_openal_iterator_fill}"
+            _lain_openal_auxeffectslot_text
+            "${_lain_openal_auxeffectslot_text}")
+          file(WRITE "${_lain_openal_auxeffectslot}" "${_lain_openal_auxeffectslot_text}")
+    else()
+          string(FIND "${_lain_openal_auxeffectslot_text}"
+                 "${_lain_openal_iterator_fill}" _lain_openal_new_fill_pos)
+          if(_lain_openal_new_fill_pos LESS 0)
+          message(FATAL_ERROR "Unexpected OpenAL auxeffectslot.cpp contents")
+          endif()
+    endif()
+    unset(_lain_openal_auxeffectslot)
+    unset(_lain_openal_auxeffectslot_text)
+    unset(_lain_openal_ranges_fill)
+    unset(_lain_openal_iterator_fill)
+    unset(_lain_openal_old_fill_pos)
+    unset(_lain_openal_new_fill_pos)
+    if(NOT TARGET OpenAL::OpenAL)
+        add_library(OpenAL::OpenAL ALIAS OpenAL)
+    endif()
+    target_compile_definitions(OpenAL INTERFACE AL_LIBTYPE_STATIC)
+
+elseif(LAIN_STATIC_DEPS)
     include(FetchContent)
     set(SDL_SHARED OFF CACHE BOOL "" FORCE)
     set(SDL_STATIC ON CACHE BOOL "" FORCE)
@@ -63,12 +137,19 @@ target_include_directories(imgui PUBLIC external/imgui external/imgui/backends)
 if(NOT TARGET SDL2::SDL2)
     find_package(SDL2 REQUIRED)
 endif()
-find_package(OpenGL REQUIRED)
-target_link_libraries(imgui PUBLIC SDL2::SDL2 OpenGL::GL)
+if(ANDROID)
+    target_compile_definitions(imgui PRIVATE IMGUI_IMPL_OPENGL_ES3 GL_GLEXT_PROTOTYPES)
+    target_link_libraries(imgui PUBLIC SDL2::SDL2 GLESv3 EGL)
+else()
+    find_package(OpenGL REQUIRED)
+    target_link_libraries(imgui PUBLIC SDL2::SDL2 OpenGL::GL)
+endif()
 
-# tinyfiledialogs (zlib): native "open file" dialogs.
-add_library(tinyfd STATIC external/tinyfiledialogs/tinyfiledialogs.c)
-target_include_directories(tinyfd PUBLIC external/tinyfiledialogs)
+# tinyfiledialogs is desktop-only; Android uses the platform document picker.
+if(NOT ANDROID)
+    add_library(tinyfd STATIC external/tinyfiledialogs/tinyfiledialogs.c)
+    target_include_directories(tinyfd PUBLIC external/tinyfiledialogs)
+endif()
 
 # The PS1 RAM arena with every game global at its original offset (generated).
 add_library(psx_arena STATIC game/generated/psx_arena.S)
@@ -81,14 +162,23 @@ if(NOT WIN32)
     target_compile_definitions(lua PRIVATE LUA_USE_POSIX)
 endif()
 
+if(ANDROID)
+    set(LAIN_SETUP_UI_SOURCE client/setup_ui_android.cpp)
+else()
+    set(LAIN_SETUP_UI_SOURCE client/setup_ui.cpp)
+endif()
+
 add_library(client STATIC
-    client/discs.c client/settings.c client/sha1.c client/setup_ui.cpp
+    client/discs.c client/settings.c client/sha1.c ${LAIN_SETUP_UI_SOURCE}
     client/iso.c client/psx_mem.c client/overlay.cpp client/packs.cpp client/sub_download.cpp client/unused_gallery.cpp client/app_icon.c
     client/tracks.c client/subtitles.c client/subtitle_kit.c client/dub.c client/dub_player.c
     client/mods.cpp client/mods_ui.cpp client/modrt.cpp client/moddata.cpp client/hdtex.cpp client/json.cpp client/napk.c client/png.c client/tim.c
     external/stb/stb_vorbis_impl.c)
 target_include_directories(client PUBLIC client game/include external/stb)
-target_link_libraries(client PUBLIC imgui tinyfd psx lua SDL2::SDL2)
+target_link_libraries(client PUBLIC imgui psx lua SDL2::SDL2)
+if(NOT ANDROID)
+    target_link_libraries(client PUBLIC tinyfd)
+endif()
 
 # The ported game code (every function has C; see game/PORT_TYPES.md). It is
 # compiled from copies in which every game function can be replaced at run time
@@ -112,27 +202,37 @@ target_link_libraries(game PUBLIC psx)
 # The game's main() becomes lain_game_main(), called by src/main.c.
 set_source_files_properties(${HOOKS_DIR}/game/80013138.c PROPERTIES COMPILE_DEFINITIONS main=lain_game_main)
 
-add_executable(lain src/main.c src/platform.c src/sdk_extra.c)
-target_link_libraries(lain PRIVATE client game psx psx_arena)
-if(WIN32)
-    # UTF-8 code page for fopen/system/*A calls (see src/lain.manifest).
-    target_sources(lain PRIVATE src/lain.rc)
-    # SDL renames main() to SDL_main; SDL2main provides the Windows entry point.
-    target_link_libraries(lain PRIVATE SDL2::SDL2main)
-endif()
-if(LAIN_STATIC_DEPS AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    # Release: no dependency on the build machine's (newer) libstdc++.
-    target_link_options(lain PRIVATE -static-libgcc -static-libstdc++)
-endif()
-if(MINGW AND LAIN_STATIC_DEPS)
-    # Release: no MinGW runtime DLLs (libstdc++, libgcc, winpthread) next to lain.exe.
-    target_link_options(lain PRIVATE -static -static-libgcc -static-libstdc++)
+if(ANDROID)
+    # SDLActivity loads libSDL2.so, followed by this game library: libmain.so.
+    add_library(main SHARED src/main.c src/platform.c src/sdk_extra.c)
+    set(LAIN_APP_TARGET main)
+    target_link_libraries(main PRIVATE client game psx psx_arena SDL2::SDL2main)
+else()
+    add_executable(lain src/main.c src/platform.c src/sdk_extra.c)
+    set(LAIN_APP_TARGET lain)
+    target_link_libraries(lain PRIVATE client game psx psx_arena)
+    if(WIN32)
+        # UTF-8 code page for fopen/system/*A calls (see src/lain.manifest).
+        target_sources(lain PRIVATE src/lain.rc)
+        # SDL renames main() to SDL_main; SDL2main provides the Windows entry point.
+        target_link_libraries(lain PRIVATE SDL2::SDL2main)
+    endif()
+    if(LAIN_STATIC_DEPS AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        # Release: no dependency on the build machine's (newer) libstdc++.
+        target_link_options(lain PRIVATE -static-libgcc -static-libstdc++)
+    endif()
+    if(MINGW AND LAIN_STATIC_DEPS)
+        # Release: no MinGW runtime DLLs (libstdc++, libgcc, winpthread) next to lain.exe.
+        target_link_options(lain PRIVATE -static -static-libgcc -static-libstdc++)
+    endif()
 endif()
 
 # Debug aid: print every game function the first time it runs (src/trace.c).
 option(LAIN_TRACE "Trace game function entries" OFF)
 if(LAIN_TRACE)
     target_compile_options(game PRIVATE -finstrument-functions)
-    target_sources(lain PRIVATE src/trace.c)
-    target_link_options(lain PRIVATE -rdynamic)
+    target_sources(${LAIN_APP_TARGET} PRIVATE src/trace.c)
+    if(NOT ANDROID)
+        target_link_options(${LAIN_APP_TARGET} PRIVATE -rdynamic)
+    endif()
 endif()
