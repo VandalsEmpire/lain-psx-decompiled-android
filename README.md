@@ -33,7 +33,52 @@ executable is identical.
 > This repository and its releases contain **no game data**. Movies, voices, images, sounds,
 > text and data tables are read from your own dump of the two original discs.
 
-## Playing
+## Android (re:Lain)
+
+This fork adds **re:Lain for Android**, a native Android port of the Serial Experiments Lain PlayStation decompilation and client.
+
+**[Download the latest Android APK](https://github.com/VandalsEmpire/lain-psx-decompiled-android/releases/latest)** · [Android documentation](android/README.md)
+
+### Requirements
+
+- Android 6.0 (API 23) or newer.
+- 64-bit ARM device (arm64-v8a).
+- OpenGL ES 3.0 support.
+- Landscape orientation.
+
+### Getting started
+
+1. Obtain your own dumps of both original PlayStation discs.
+2. Download and install the APK from the Releases page above.
+3. Open re:Lain and import the raw Disc 1 `.bin` or `.img` data track in the Discs tab.
+4. Import Disc 2 when needed and press Play.
+5. Tap MENU during gameplay to open the in-game menu.
+
+The Android importer accepts raw 2352-byte BIN/IMG data tracks. CHD and 2048-byte ISO images are not supported.
+
+### Android features
+
+- Configurable PlayStation-style touchscreen controls.
+- Physical gamepad support.
+- Mod importing and management.
+- Unused-content gallery using your own disc images.
+- Optional English and Portuguese (Brazil) fan subtitle downloads.
+
+### Current limitations
+
+- First device release supports arm64-v8a only.
+- Launcher interface is currently in English.
+- Landscape orientation only.
+- 60 fps frame interpolation is disabled because it caused rendering artifacts on some devices.
+
+No copyrighted game data is included. You must provide your own original disc dumps.
+
+## Desktop clients
+
+The Windows, macOS and Linux clients are maintained in the [upstream project](https://github.com/Y0oshi/lain-psx-decompiled).
+
+
+## Playing on desktop
 
 1. Dump both discs in Redump format (`.cue` + `.bin`).
 2. Download the client for your system from [Releases](https://github.com/Y0oshi/lain-psx-decompiled/releases):
@@ -147,8 +192,7 @@ A successful build ends with `build/SLPS_016.03: OK`. To work on functions, see
 
 ## License
 
-The code in this repository is released under the [MIT License](LICENSE), copyright Y0oshi.
-Third-party components keep their own licenses; see [thirdparty/](thirdparty/README.md).
+This fork, including the Android port, is distributed under the upstream [MIT License](LICENSE). The original copyright notice for Y0oshi is retained. Third-party components keep their own licenses; see [thirdparty/](thirdparty/README.md).
 
 *Serial Experiments Lain* is the property of its respective rights holders. This project is
 not affiliated with or endorsed by them. The icon is adapted from the game's memory

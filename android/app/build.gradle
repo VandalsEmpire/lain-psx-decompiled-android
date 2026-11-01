@@ -4,6 +4,36 @@ plugins {
 
 def sdlRoot = rootProject.file(".deps/SDL2-2.32.10")
 
+// Local release signing credentials. Never commit keystore.properties.
+def releaseSigningPropertiesFile = rootProject.file("keystore.properties")
+def releaseSigningProperties = new java.util.Properties()
+def releaseSigningConfigured = releaseSigningPropertiesFile.isFile()
+def releaseSigningStoreFile = null
+
+if (releaseSigningConfigured) {
+    releaseSigningPropertiesFile.withInputStream {
+        releaseSigningProperties.load(it)
+    }
+
+    def requiredSigningKeys = ["storeFile", "storePassword", "keyAlias", "keyPassword"]
+    def missingSigningKeys = requiredSigningKeys.findAll {
+        !releaseSigningProperties.getProperty(it, "").trim()
+    }
+    if (!missingSigningKeys.isEmpty()) {
+        throw new GradleException("Missing keys in android/keystore.properties: " + missingSigningKeys.join(", "))
+    }
+
+    def storePath = releaseSigningProperties.getProperty("storeFile").trim()
+    releaseSigningStoreFile = new File(storePath)
+    if (!releaseSigningStoreFile.isAbsolute()) {
+        releaseSigningStoreFile = rootProject.file(storePath)
+    }
+    if (!releaseSigningStoreFile.isFile()) {
+        throw new GradleException("Release keystore not found: " + releaseSigningStoreFile)
+    }
+}
+
+
 android {
     namespace "org.libsdl.app"
     compileSdk 36
@@ -28,6 +58,20 @@ android {
         }
     }
 
+    signingConfigs {
+        if (releaseSigningConfigured) {
+            release {
+                storeFile = releaseSigningStoreFile
+                storePassword = releaseSigningProperties.getProperty("storePassword")
+                keyAlias = releaseSigningProperties.getProperty("keyAlias")
+                keyPassword = releaseSigningProperties.getProperty("keyPassword")
+                enableV1Signing = true
+                enableV2Signing = true
+                enableV3Signing = true
+            }
+        }
+    }
+
     buildTypes {
         debug {
             applicationIdSuffix ".debug"
@@ -35,6 +79,9 @@ android {
         }
         release {
             minifyEnabled false
+            if (releaseSigningConfigured) {
+                signingConfig signingConfigs.release
+            }
         }
     }
 

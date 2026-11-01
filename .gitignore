@@ -33,3 +33,9 @@ tools/bin/
 port/mod_examples/*/plugins/*.dylib
 port/mod_examples/*/plugins/*.dll
 port/mod_examples/*/plugins/*.so
+
+# Android release signing material - never commit
+android/keystore.properties
+android/*.jks
+android/*.keystore
+android/*.p12
