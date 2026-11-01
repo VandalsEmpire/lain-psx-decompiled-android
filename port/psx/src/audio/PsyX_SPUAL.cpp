@@ -1,4 +1,5 @@
 #include "../PsyX_main.h"
+#include "../platform.h"
 
 #include "psx/libspu.h"
 #include "psx/libetc.h"

@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include "PsyX_GPU.h"
 #include "lain_hd.h"
 

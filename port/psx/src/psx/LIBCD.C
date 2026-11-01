@@ -1,4 +1,5 @@
 #include "psx/libcd.h"
+#include "../platform.h"
 
 #include "../PsyX_main.h"
 #include "../iso9660.h"

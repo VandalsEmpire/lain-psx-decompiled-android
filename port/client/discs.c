@@ -136,6 +136,17 @@ typedef struct {
     char data_dir[1024];
 } ImportArgs;
 
+static int is_picker_import_path(const char *path, const char *data_dir) {
+    size_t n = strlen(data_dir);
+    if (n == 0 || strncmp(path, data_dir, n) != 0) {
+        return 0;
+    }
+    if (path[n] == '/' || path[n] == '\\') {
+        n++;
+    }
+    return strncmp(path + n, "picker-import-", sizeof("picker-import-") - 1) == 0;
+}
+
 static int import_thread(void *p) {
     ImportArgs *a = p;
     ImportJob *job = a->job;
@@ -146,28 +157,40 @@ static int import_thread(void *p) {
         free(a);
         return 0;
     }
+
+    /* Android's SAF bridge stages the selected document in app-private storage.
+     * Hash and rename that file in place to avoid a second full-size CD copy. */
+    const int in_place = is_picker_import_path(bin, a->data_dir);
     FILE *in = fopen(bin, "rb");
     if (!in) {
-        snprintf(job->message, sizeof job->message, "Can't open %s", bin);
+        snprintf(job->message, sizeof job->message, "Can't open selected disc image");
         job->state = IMPORT_FAILED;
         free(a);
         return 0;
     }
-    fseek(in, 0, SEEK_END);
-    long total = ftell(in);
-    fseek(in, 0, SEEK_SET);
-    if (total <= 0 || total % RAW_SECTOR != 0) {
-        snprintf(job->message, sizeof job->message,
-                 "Not a raw (2352-byte sector) image. Dump in Redump format (BIN/CUE).");
+    if (fseek(in, 0, SEEK_END) != 0) {
+        snprintf(job->message, sizeof job->message, "Can't seek in disc image");
         fclose(in);
+        if (in_place) remove(bin);
         job->state = IMPORT_FAILED;
         free(a);
         return 0;
     }
-    snprintf(tmp, sizeof tmp, "%s/import.tmp", a->data_dir);
-    FILE *out = fopen(tmp, "wb");
-    if (!out) {
-        snprintf(job->message, sizeof job->message, "Can't write to %s", a->data_dir);
+    long total = ftell(in);
+    if (total <= 0 || total % RAW_SECTOR != 0 || fseek(in, 0, SEEK_SET) != 0) {
+        snprintf(job->message, sizeof job->message,
+                 "Not a raw 2352-byte-sector image. Select a Redump BIN/IMG data track.");
+        fclose(in);
+        if (in_place) remove(bin);
+        job->state = IMPORT_FAILED;
+        free(a);
+        return 0;
+    }
+
+    snprintf(tmp, sizeof tmp, "%simport.tmp", a->data_dir);
+    FILE *out = in_place ? NULL : fopen(tmp, "wb");
+    if (!in_place && !out) {
+        snprintf(job->message, sizeof job->message, "Can't write to app data folder");
         fclose(in);
         job->state = IMPORT_FAILED;
         free(a);
@@ -177,25 +200,41 @@ static int import_thread(void *p) {
     Sha1 sha;
     sha1_init(&sha);
     uint8_t *buf = malloc(COPY_CHUNK);
+    if (!buf) {
+        snprintf(job->message, sizeof job->message, "Not enough memory to import disc");
+        fclose(in);
+        if (out) fclose(out);
+        if (in_place) remove(bin);
+        else remove(tmp);
+        job->state = IMPORT_FAILED;
+        free(a);
+        return 0;
+    }
+
     long done = 0;
     size_t n;
+    int write_error = 0;
     while ((n = fread(buf, 1, COPY_CHUNK, in)) > 0) {
         sha1_update(&sha, buf, n);
-        if (fwrite(buf, 1, n, out) != n) {
+        if (out && fwrite(buf, 1, n, out) != n) {
             snprintf(job->message, sizeof job->message, "Disk full while copying");
+            write_error = 1;
             break;
         }
         done += (long)n;
         job->progress = (float)done / (float)total;
     }
+    const int read_error = ferror(in);
     free(buf);
     fclose(in);
-    fclose(out);
-    if (done != total) {
-        remove(tmp);
+    if (out) fclose(out);
+
+    if (done != total || read_error || write_error) {
         if (!job->message[0]) {
-            snprintf(job->message, sizeof job->message, "Read error while copying");
+            snprintf(job->message, sizeof job->message, "Read error while importing disc");
         }
+        if (in_place) remove(bin);
+        else remove(tmp);
         job->state = IMPORT_FAILED;
         free(a);
         return 0;
@@ -212,25 +251,29 @@ static int import_thread(void *p) {
             job->verified = 1;
         }
     }
+
+    const char *import_path = in_place ? bin : tmp;
     if (job->disc == DISC_UNKNOWN) {
-        job->disc = discs_identify_by_contents(tmp);
+        job->disc = discs_identify_by_contents(import_path);
     }
     if (job->disc == DISC_UNKNOWN) {
-        remove(tmp);
+        remove(import_path);
         snprintf(job->message, sizeof job->message, "This isn't a Serial Experiments Lain disc");
         job->state = IMPORT_FAILED;
         free(a);
         return 0;
     }
+
     snprintf(dst, sizeof dst, "%sdisc%d.bin", a->data_dir, job->disc);
     remove(dst);
-    if (rename(tmp, dst) != 0) {
-        remove(tmp);
-        snprintf(job->message, sizeof job->message, "Can't save %s", dst);
+    if (rename(import_path, dst) != 0) {
+        remove(import_path);
+        snprintf(job->message, sizeof job->message, "Can't save imported disc");
         job->state = IMPORT_FAILED;
         free(a);
         return 0;
     }
+
     snprintf(job->message, sizeof job->message, job->verified
                  ? "Disc %d imported (verified retail dump)"
                  : "Disc %d imported (unverified dump: it may be modified or a different release)",
@@ -243,12 +286,23 @@ static int import_thread(void *p) {
 
 void discs_import_start(ImportJob *job, const char *path, const char *data_dir) {
     memset(job, 0, sizeof *job);
-    job->state = IMPORT_RUNNING;
     ImportArgs *a = calloc(1, sizeof *a);
+    if (!a) {
+        snprintf(job->message, sizeof job->message, "Not enough memory to start disc import");
+        job->state = IMPORT_FAILED;
+        return;
+    }
     a->job = job;
     snprintf(a->src, sizeof a->src, "%s", path);
     snprintf(a->data_dir, sizeof a->data_dir, "%s", data_dir);
+    job->state = IMPORT_RUNNING;
     SDL_Thread *t = SDL_CreateThread(import_thread, "disc import", a);
+    if (!t) {
+        snprintf(job->message, sizeof job->message, "Could not start disc import: %s", SDL_GetError());
+        job->state = IMPORT_FAILED;
+        free(a);
+        return;
+    }
     SDL_DetachThread(t);
 }
 

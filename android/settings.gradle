@@ -1,0 +1,85 @@
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+/*
+ * SDL2 supplies the Java/JNI Activity glue as well as its native library.
+ * Keep the upstream source outside version control and pin the exact release
+ * with a SHA-256 check. CMake consumes this same extracted directory.
+ */
+def sdlVersion = "2.32.10"
+def sdlArchiveName = "SDL2-${sdlVersion}.tar.gz"
+def sdlRoot = new File(settingsDir, ".deps/SDL2-${sdlVersion}")
+def sdlArchive = new File(settingsDir, ".deps/${sdlArchiveName}")
+def expectedSha256 = "5f5993c530f084535c65a6879e9b26ad441169b3e25d789d83287040a9ca5165"
+
+def sha256Of = { File file ->
+    def digest = java.security.MessageDigest.getInstance("SHA-256")
+    file.withInputStream { input ->
+        byte[] buffer = new byte[65536]
+        int count
+        while ((count = input.read(buffer)) != -1) {
+            digest.update(buffer, 0, count)
+        }
+    }
+    digest.digest().encodeHex().toString()
+}
+
+if (!new File(sdlRoot, "CMakeLists.txt").isFile()
+        || !new File(sdlRoot, "android-project/app/src/main/java/org/libsdl/app/SDLActivity.java").isFile()) {
+    def depsDir = sdlRoot.parentFile
+    if (!depsDir.exists() && !depsDir.mkdirs()) {
+        throw new GradleException("Could not create SDL dependency directory: ${depsDir}")
+    }
+
+    def temporaryArchive = new File(depsDir, "${sdlArchiveName}.part")
+    def downloadUrl = new URL("https://www.libsdl.org/release/${sdlArchiveName}")
+    logger.lifecycle("Downloading pinned SDL2 ${sdlVersion} source...")
+    downloadUrl.openStream().withCloseable { input ->
+        temporaryArchive.withOutputStream { output -> output << input }
+    }
+
+    def actualSha256 = sha256Of(temporaryArchive)
+    if (actualSha256 != expectedSha256) {
+        temporaryArchive.delete()
+        throw new GradleException("SDL2 archive SHA-256 mismatch: ${actualSha256}")
+    }
+
+    if (sdlRoot.exists()) {
+        sdlRoot.deleteDir()
+    }
+    if (sdlArchive.exists()) {
+        sdlArchive.delete()
+    }
+    if (!temporaryArchive.renameTo(sdlArchive)) {
+        throw new GradleException("Could not move verified SDL2 archive into place")
+    }
+
+    logger.lifecycle("Extracting SDL2 ${sdlVersion}...")
+    def extractor = new ProcessBuilder(
+        "tar", "-xzf", sdlArchive.absolutePath, "-C", depsDir.absolutePath
+    ).redirectErrorStream(true).start()
+    def extractLog = extractor.inputStream.getText("UTF-8")
+    if (extractor.waitFor() != 0) {
+        throw new GradleException("Could not extract SDL2 archive with tar: ${extractLog}")
+    }
+}
+
+if (!new File(sdlRoot, "android-project/app/src/main/java/org/libsdl/app/SDLActivity.java").isFile()) {
+    throw new GradleException("SDL2 extraction failed; missing SDLActivity.java")
+}
+
+rootProject.name = "LainAndroid"
+include(":app")

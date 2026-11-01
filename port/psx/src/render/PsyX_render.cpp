@@ -325,10 +325,8 @@ int GR_InitialiseGLContext(char* windowName, int fullscreen)
 	SDL_DisplayMode displayMode;
 	if (SDL_GetCurrentDisplayMode(0, &displayMode) == 0)
 	{
-		screenWidth = displayMode.w;
-		windowWidth = displayMode.w;
-		screenHeight = displayMode.h;
-		windowHeight = displayMode.h;
+		g_windowWidth = displayMode.w;
+		g_windowHeight = displayMode.h;
 	}
 #endif
 
@@ -634,7 +632,11 @@ void GR_InterpBegin()
 	glBlitFramebuffer(0, 0, s_interpW, s_interpH, 0, 0, s_interpW, s_interpH, GL_COLOR_BUFFER_BIT, GL_NEAREST);
 	g_screenFramebuffer = s_interpFbo;
 	glBindFramebuffer(GL_FRAMEBUFFER, s_interpFbo);
+	#if defined(RENDERER_OGLES)
+	glClearDepthf(1.0f);
+	#else
 	glClearDepth(1.0f);
+	#endif
 	glClear(GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
 	int vx, vy, vw, vh;
 	GR_GetViewRect(&vx, &vy, &vw, &vh);
@@ -701,9 +703,9 @@ void GR_BeginScene()
 
 #if USE_OPENGL
 #ifdef RENDERER_OGLES
-	//glClearDepthf(1.0f);
+glClearDepthf(1.0f);
 #else
-	glClearDepth(1.0f);
+glClearDepth(1.0f);
 #endif
 	glClear(GL_DEPTH_BUFFER_BIT);
 	glClear(GL_STENCIL_BUFFER_BIT);

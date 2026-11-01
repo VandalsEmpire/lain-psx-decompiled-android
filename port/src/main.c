@@ -1,7 +1,7 @@
 /* Lain native client entry point: launcher/setup window, then the game. */
 #include <assert.h> /* libgpu.h uses static_assert */
 #include <SDL.h>
-#ifndef _WIN32 /* POSIX crash handler (debug aid) */
+#if !defined(_WIN32) && !defined(__ANDROID__) /* POSIX crash handler (debug aid) */
 #include <execinfo.h>
 #include <signal.h>
 #include <unistd.h>
@@ -17,7 +17,11 @@
 #include "libgte.h"
 #include "libgpu.h" /* before PsyX_public.h: it uses struct _RECT16 */
 #include "PsyX/PsyX_public.h"
+#if defined(__ANDROID__)
+#include <GLES3/gl3.h>
+#else
 #include "PsyX/common/glad.h"
+#endif
 #include "libcd.h"
 #include "libspu.h" /* LainSpu_SetOutputGain: master volume */
 #include "libgs.h"
@@ -661,7 +665,7 @@ static void on_end_scene(void) {
 
 /* Prints the faulting address and a backtrace on a crash (lldb isn't always
  * usable in batch runs). Symbolize with atos -o lain -l <image base> <pc>. */
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__ANDROID__)
 #include <sys/ucontext.h>
 static void crash_handler(int sig, siginfo_t *info, void *uctx) {
     void *frames[64];
@@ -683,10 +687,10 @@ static void crash_handler(int sig, siginfo_t *info, void *uctx) {
     backtrace_symbols_fd(frames, n, 2);
     _exit(128 + sig);
 }
-#endif /* !_WIN32 */
+#endif /* POSIX crash handler; Android uses logcat/NDK diagnostics */
 
 static void debug_hooks_init(void) {
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__ANDROID__)
     struct sigaction sa;
     memset(&sa, 0, sizeof sa);
     sa.sa_sigaction = crash_handler;
@@ -747,7 +751,11 @@ extern int port_cheat_open_nodes, port_cheat_genome_title; /* game/port_libc.c *
 
 static void apply_video(const Settings *s) {
     g_cfg_renderScale = s->render_scale;
+#if defined(__ANDROID__)
+    g_cfg_interpolate = 0;
+#else
     g_cfg_interpolate = s->smooth;
+#endif
     PsyX_EnableSwapInterval(s->vsync ? 1 : 0);
     SDL_Window *win = SDL_GL_GetCurrentWindow();
     int is_full = win && (SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN) != 0;
@@ -825,7 +833,11 @@ static int boot_game(const Settings *initial, const char *disc1, const char *dis
     overlay_menu_init(&live_settings, apply_menu_change);
     port_cheat_open_nodes = settings->cheat_open_nodes;
     port_cheat_genome_title = settings->cheat_genome;
+#if defined(__ANDROID__)
+    g_cfg_interpolate = 0; /* the interpolation path currently produces visual glitches on Android */
+#else
     g_cfg_interpolate = getenv("LAIN_SMOOTH") ? atoi(getenv("LAIN_SMOOTH")) : settings->smooth;
+#endif
     g_lain_onInterpPresent = on_interp_present; /* subtitles and the F1 menu on in-between frames too */
     g_lain_onEvent = overlay_handle_event;
     LainSpu_SetOutputGain(settings->volume / 100.0f);

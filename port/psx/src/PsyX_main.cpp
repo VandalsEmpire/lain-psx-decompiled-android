@@ -573,11 +573,11 @@ void PrintMessageToOutput(SpewType_t spewtype, char const* pMsgFormat, va_list a
 		}, pTempBuffer);
 	}
 #else
-	printf(pTempBuffer);
+	printf("%s", pTempBuffer);
 #endif
 
 	if(g_logStream)
-		fprintf(g_logStream, pTempBuffer);
+		fprintf(g_logStream, "%s", pTempBuffer);
 }
 
 void PsyX_Log(const char* fmt, ...)

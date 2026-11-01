@@ -1,4 +1,5 @@
 #include "psx/libpad.h"
+#include "../platform.h"
 #include "psx/libetc.h"
 
 #include "../PsyX_main.h"
@@ -196,6 +197,12 @@ void PsyX_Pad_Event_ControllerRemoved(Sint32 instanceId)
 }
 
 int g_lain_padBlocked = 0; // lain
+static u_short g_lain_touchPadMask = 0xffff;
+
+extern "C" void PsyX_Pad_SetTouchButtons(unsigned short active_low_mask)
+{
+    g_lain_touchPadMask = (u_short)active_low_mask;
+}
 
 void PsyX_Pad_InternalPadUpdates()
 {
@@ -273,6 +280,15 @@ void PsyX_Pad_InternalPadUpdates()
 				}
 
 				*(u_short*)pad->buttons &= kbInputs;
+			}
+
+			// Android virtual controls feed controller 1 without creating a fake SDL device.
+			if (i == 0 && g_lain_touchPadMask != 0xffff)
+			{
+				pad->status = 0;
+				if (pad->id != 0x41)
+					pad->id = 0x41; // Touch controls are a digital PS1 pad.
+				*(u_short*)pad->buttons &= g_lain_touchPadMask;
 			}
 		}
 	}

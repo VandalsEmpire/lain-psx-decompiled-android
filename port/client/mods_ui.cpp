@@ -1,5 +1,6 @@
 #include "mods_ui.h"
 
+#include <algorithm>
 #include <ctype.h>
 #include <stdio.h>
 #include <string.h>
@@ -11,6 +12,11 @@
 #include <vector>
 
 #include <SDL.h>
+#if defined(__ANDROID__)
+#include <SDL_system.h>
+#include <jni.h>
+#include <mutex>
+#endif
 
 #include "discs.h"
 #include "imgui.h"
@@ -45,6 +51,35 @@ struct Tab {
 };
 
 Tab g_tab;
+
+#if defined(__ANDROID__)
+std::mutex g_android_import_mutex;
+std::string g_android_import_path;
+std::string g_android_import_message;
+bool g_android_import_ready = false;
+
+bool request_android_mod_folder_picker(void) {
+    JNIEnv *env = static_cast<JNIEnv *>(SDL_AndroidGetJNIEnv());
+    jobject activity = static_cast<jobject>(SDL_AndroidGetActivity());
+    if (!env || !activity) {
+        if (env && activity) env->DeleteLocalRef(activity);
+        return false;
+    }
+    jclass cls = env->GetObjectClass(activity);
+    jmethodID method = cls ? env->GetMethodID(cls, "openModFolderPicker", "(Ljava/lang/String;)V") : nullptr;
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    jstring directory = method ? env->NewStringUTF(mods_dir().c_str()) : nullptr;
+    bool ok = method && directory;
+    if (ok) {
+        env->CallVoidMethod(activity, method, directory);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); ok = false; }
+    }
+    if (directory) env->DeleteLocalRef(directory);
+    if (cls) env->DeleteLocalRef(cls);
+    env->DeleteLocalRef(activity);
+    return ok;
+}
+#endif
 
 bool disc_paths(std::string &d1, std::string &d2) {
     char a[1024], b[1024];
@@ -162,9 +197,43 @@ void draw_details(const ModInfo &m) {
 
 } // namespace
 
+#if defined(__ANDROID__)
+extern "C" void mods_android_import_result(const char *folder_path, const char *message) {
+    std::lock_guard<std::mutex> lock(g_android_import_mutex);
+    g_android_import_path = folder_path ? folder_path : "";
+    g_android_import_message = message ? message : "";
+    g_android_import_ready = true;
+}
+#endif
+
 void mods_tab_draw(Settings *s) {
     Tab &t = g_tab;
     if (!t.loaded) refresh(s);
+#if defined(__ANDROID__)
+    std::string imported_path, imported_message;
+    bool import_ready = false;
+    {
+        std::lock_guard<std::mutex> lock(g_android_import_mutex);
+        if (g_android_import_ready) {
+            imported_path.swap(g_android_import_path);
+            imported_message.swap(g_android_import_message);
+            g_android_import_ready = false;
+            import_ready = true;
+        }
+    }
+    if (import_ready) {
+        t.message = imported_message;
+        if (!imported_path.empty()) {
+            t.mods = mods_scan(s->mods);
+            const size_t slash = imported_path.find_last_of("/\\");
+            const std::string folder = slash == std::string::npos ? imported_path : imported_path.substr(slash + 1);
+            for (size_t i = 0; i < t.mods.size(); i++) {
+                if (t.mods[i].folder == folder) t.selected = (int)i;
+            }
+            save_order(s); /* persist the imported mod; new folders are enabled by default */
+        }
+    }
+#endif
     if (t.check && t.check->done) {
         /* the check ran on a copy: keep it only if the list hasn't changed since */
         if (t.check->mods.size() == t.mods.size()) {
@@ -184,6 +253,19 @@ void mods_tab_draw(Settings *s) {
 
     ImGui::TextWrapped("Mods replace pictures, text, voices and other game files with your own. "
                        "They are applied when you press Play; your discs are never changed.");
+#if defined(__ANDROID__)
+    const float ui_scale = ImGui::GetFontSize() / 13.0f;
+    if (ImGui::Button("Import mod folder", ImVec2(205.0f * ui_scale, 46.0f * ui_scale))) {
+        if (request_android_mod_folder_picker()) {
+            t.message = "Choose the mod's folder (the one containing its files)...";
+        } else {
+            t.message = "Could not open Android's folder picker.";
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Refresh", ImVec2(118.0f * ui_scale, 46.0f * ui_scale))) refresh(s);
+    ImGui::TextDisabled("Select one mod folder. mod.ini is optional; ZIPs must be extracted first.");
+#else
     if (ImGui::Button("Open mods folder")) open_folder(mods_dir());
     ImGui::SameLine();
     if (ImGui::Button("Refresh")) refresh(s);
@@ -233,11 +315,15 @@ void mods_tab_draw(Settings *s) {
         }).detach();
     }
     ImGui::EndDisabled();
+#endif
+#if !defined(__ANDROID__)
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
         ImGui::SetTooltip("Writes every picture, voice and file of your discs to mods/_originals,\n"
                           "as files a mod can replace. Copy the ones you want to change into your mod.");
     }
+#endif
 
+#if !defined(__ANDROID__)
     if (exporting) {
         ImGui::ProgressBar(t.exp->progress, ImVec2(-1, 0), "Exporting originals...");
     } else if (t.exp && t.exp->state == 2) {
@@ -249,6 +335,9 @@ void mods_tab_draw(Settings *s) {
             ImGui::TextColored(level_color(2), "Export failed: %s", t.exp->msg);
         }
     } else if (!t.message.empty()) {
+#else
+    if (!t.message.empty()) {
+#endif
         ImGui::TextWrapped("%s", t.message.c_str());
     } else if (!have1) {
         ImGui::TextDisabled("Import disc 1 on the Setup tab to check and use mods.");
@@ -266,13 +355,28 @@ void mods_tab_draw(Settings *s) {
 
     if (t.mods.empty()) {
         ImGui::Spacing();
+#if defined(__ANDROID__)
+        ImGui::TextDisabled("No mods installed. Use Import mod folder to add one.");
+#else
         ImGui::TextDisabled("No mods installed. Put a mod's folder in the mods folder, or make one with New mod.");
+#endif
         ImGui::TextDisabled("port/MODDING.md explains how mods work.");
         return;
     }
 
-    /* Left: the list in load order. Right: the selected mod. */
-    ImGui::BeginChild("modlist", ImVec2(ImGui::GetContentRegionAvail().x * 0.42f, 0), true);
+    /* Desktop uses a two-column view. Android stacks the list and details so the
+     * controls remain comfortably tappable on a phone in landscape orientation. */
+#if defined(__ANDROID__)
+    const bool stacked = true;
+#else
+    const bool stacked = ImGui::GetContentRegionAvail().x < 1050.0f;
+#endif
+    const ImVec2 available = ImGui::GetContentRegionAvail();
+    const float list_height = std::max(96.0f, std::min(180.0f, available.y * 0.30f));
+    ImGui::BeginChild("modlist",
+                      stacked ? ImVec2(0, list_height)
+                              : ImVec2(available.x * 0.42f, 0),
+                      true);
     ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
     ImGui::TextWrapped("Load order: when two mods change the same file, the lower one wins.");
     ImGui::PopStyleColor();
@@ -292,7 +396,7 @@ void mods_tab_draw(Settings *s) {
         ImGui::PopID();
     }
     ImGui::EndChild();
-    ImGui::SameLine();
+    if (!stacked) ImGui::SameLine();
     ImGui::BeginChild("moddetail", ImVec2(0, 0), true);
     if (t.selected >= 0 && t.selected < (int)t.mods.size()) {
         const int i = t.selected;
@@ -312,7 +416,9 @@ void mods_tab_draw(Settings *s) {
         }
         ImGui::EndDisabled();
         ImGui::SameLine();
+#if !defined(__ANDROID__)
         if (ImGui::Button("Open folder")) open_folder(mods_dir() + "/" + t.mods[t.selected].folder);
+#endif
         ImGui::Separator();
         if (t.selected < (int)t.mods.size()) draw_details(t.mods[t.selected]);
     }
