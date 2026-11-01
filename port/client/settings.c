@@ -49,8 +49,23 @@ void settings_defaults(Settings *s) {
     s->height = 960;
     s->render_scale = 0; /* auto: the window's resolution */
     s->vsync = 1;
+#if defined(__ANDROID__)
+    s->smooth = 0; /* frame interpolation currently causes rendering artifacts on Android */
+    s->touch_controls = 1;
+#else
     s->smooth = 1;
+    s->touch_controls = 0;
+#endif
     s->volume = 100;
+    /* Every directional and face button has its own normalized position. */
+    const float default_touch_layout[14][2] = {
+        {0.150f, 0.674f}, {0.150f, 0.836f}, {0.105f, 0.755f}, {0.195f, 0.755f}, /* D-pad */
+        {0.850f, 0.670f}, {0.803f, 0.755f}, {0.897f, 0.755f}, {0.850f, 0.840f}, /* △ □ ○ × */
+        {0.115f, 0.190f}, {0.295f, 0.190f}, {0.705f, 0.190f}, {0.885f, 0.190f}, /* L2 L1 R1 R2 */
+        {0.435f, 0.910f}, {0.565f, 0.910f}, /* Select Start */
+    };
+    memcpy(s->touch_layout, default_touch_layout, sizeof default_touch_layout);
+    s->touch_scale = 1.0f;
     strcpy(s->text_lang, "ja");
     strcpy(s->voice_lang, "ja");
     for (int i = 0; i < SETTINGS_NUM_KEYS; i++) {
@@ -90,6 +105,45 @@ void settings_load(Settings *s) {
         else if (!strcmp(key, "setup_done")) s->setup_done = atoi(val);
         else if (!strcmp(key, "mods")) snprintf(s->mods, sizeof s->mods, "%s", val);
         else if (!strcmp(key, "dump_textures")) s->dump_textures = atoi(val);
+        else if (!strcmp(key, "touch_controls")) s->touch_controls = atoi(val) != 0;
+        else if (!strcmp(key, "touch_scale")) s->touch_scale = (float)atof(val);
+        else if (!strcmp(key, "touch_layout")) {
+            float values[28];
+            int count = 0;
+            char *cursor = val;
+            while (count < 28 && *cursor) {
+                char *end = NULL;
+                float value = strtof(cursor, &end);
+                if (end == cursor) break;
+                values[count++] = value;
+                cursor = end;
+                if (*cursor == ',' || *cursor == ';') cursor++;
+                else if (*cursor != '\0') break;
+            }
+            if (count == 28) {
+                for (int i = 0; i < 14; i++) {
+                    s->touch_layout[i][0] = values[i * 2];
+                    s->touch_layout[i][1] = values[i * 2 + 1];
+                }
+            } else if (count == 16) {
+                /* Migrate the previous 8-group layout without losing user placement. */
+                const float dx_dpad = 0.045f, dy_dpad = 0.081f;
+                const float dx_face = 0.047f, dy_face = 0.085f;
+                const float dpx = values[0], dpy = values[1];
+                const float fcx = values[2], fcy = values[3];
+                const float migrated[14][2] = {
+                    {dpx, dpy - dy_dpad}, {dpx, dpy + dy_dpad},
+                    {dpx - dx_dpad, dpy}, {dpx + dx_dpad, dpy},
+                    {fcx, fcy - dy_face}, {fcx - dx_face, fcy},
+                    {fcx + dx_face, fcy}, {fcx, fcy + dy_face},
+                    {values[4], values[5]}, {values[6], values[7]},
+                    {values[8], values[9]}, {values[10], values[11]},
+                    {values[12], values[13]}, {values[14], values[15]},
+                };
+                memcpy(s->touch_layout, migrated, sizeof migrated);
+            }
+            /* If the line is incomplete or malformed, retain the defaults. */
+        }
         else if (!strncmp(key, "key_", 4)) {
             for (int i = 0; i < SETTINGS_NUM_KEYS; i++) {
                 if (!strcmp(key + 4, SETTINGS_KEY_NAMES[i])) {
@@ -103,6 +157,23 @@ void settings_load(Settings *s) {
     if (s->height < 240) s->height = 240;
     if (s->render_scale < 0 || s->render_scale > 8) s->render_scale = 0;
     if (s->volume < 0 || s->volume > 100) s->volume = 100;
+    if (s->touch_scale < 0.70f || s->touch_scale > 1.55f) s->touch_scale = 1.0f;
+    const float default_touch_layout[14][2] = {
+        {0.150f, 0.674f}, {0.150f, 0.836f}, {0.105f, 0.755f}, {0.195f, 0.755f},
+        {0.850f, 0.670f}, {0.803f, 0.755f}, {0.897f, 0.755f}, {0.850f, 0.840f},
+        {0.115f, 0.190f}, {0.295f, 0.190f}, {0.705f, 0.190f}, {0.885f, 0.190f},
+        {0.435f, 0.910f}, {0.565f, 0.910f},
+    };
+    for (int i = 0; i < 14; i++) {
+        if (s->touch_layout[i][0] < 0.02f || s->touch_layout[i][0] > 0.98f ||
+            s->touch_layout[i][1] < 0.02f || s->touch_layout[i][1] > 0.98f) {
+            s->touch_layout[i][0] = default_touch_layout[i][0];
+            s->touch_layout[i][1] = default_touch_layout[i][1];
+        }
+    }
+#if defined(__ANDROID__)
+    s->smooth = 0; /* ignore a previously saved desktop setting */
+#endif
     if (s->turbo < 0 || s->turbo > 8 || s->turbo == 1) s->turbo = 0;
 }
 
@@ -114,14 +185,25 @@ void settings_save(const Settings *s) {
         return;
     }
     fprintf(f, "; Lain native client settings\n");
+#if defined(__ANDROID__)
+    const int smooth = 0;
+#else
+    const int smooth = s->smooth;
+#endif
     fprintf(f, "fullscreen = %d\nwidth = %d\nheight = %d\nrender_scale = %d\nvsync = %d\n"
                "smooth = %d\nvolume = %d\n",
-            s->fullscreen, s->width, s->height, s->render_scale, s->vsync, s->smooth, s->volume);
+            s->fullscreen, s->width, s->height, s->render_scale, s->vsync, smooth, s->volume);
     fprintf(f, "; cheats\ncheat_open_nodes = %d\nturbo = %d\ncheat_genome = %d\n", s->cheat_open_nodes, s->turbo,
             s->cheat_genome);
     fprintf(f, "text_lang = %s\nvoice_lang = %s\nsetup_done = %d\n", s->text_lang, s->voice_lang,
             s->setup_done);
-    fprintf(f, "; mods in load order: +on / -off\nmods = %s\ndump_textures = %d\n", s->mods, s->dump_textures);
+    fprintf(f, "; mods in load order: +on / -off\nmods = %s\ndump_textures = %d\ntouch_controls = %d\n",
+            s->mods, s->dump_textures, s->touch_controls);
+    fprintf(f, "touch_scale = %.3f\ntouch_layout = ", s->touch_scale);
+    for (int i = 0; i < 14; i++) {
+        fprintf(f, "%s%.4f,%.4f", i ? ";" : "", s->touch_layout[i][0], s->touch_layout[i][1]);
+    }
+    fputc('\n', f);
     fprintf(f, "; keyboard: SDL key names\n");
     for (int i = 0; i < SETTINGS_NUM_KEYS; i++) {
         fprintf(f, "key_%s = %s\n", SETTINGS_KEY_NAMES[i], s->keys[i]);

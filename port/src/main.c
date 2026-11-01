@@ -751,7 +751,11 @@ extern int port_cheat_open_nodes, port_cheat_genome_title; /* game/port_libc.c *
 
 static void apply_video(const Settings *s) {
     g_cfg_renderScale = s->render_scale;
+#if defined(__ANDROID__)
+    g_cfg_interpolate = 0;
+#else
     g_cfg_interpolate = s->smooth;
+#endif
     PsyX_EnableSwapInterval(s->vsync ? 1 : 0);
     SDL_Window *win = SDL_GL_GetCurrentWindow();
     int is_full = win && (SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN) != 0;
@@ -829,7 +833,11 @@ static int boot_game(const Settings *initial, const char *disc1, const char *dis
     overlay_menu_init(&live_settings, apply_menu_change);
     port_cheat_open_nodes = settings->cheat_open_nodes;
     port_cheat_genome_title = settings->cheat_genome;
+#if defined(__ANDROID__)
+    g_cfg_interpolate = 0; /* the interpolation path currently produces visual glitches on Android */
+#else
     g_cfg_interpolate = getenv("LAIN_SMOOTH") ? atoi(getenv("LAIN_SMOOTH")) : settings->smooth;
+#endif
     g_lain_onInterpPresent = on_interp_present; /* subtitles and the F1 menu on in-between frames too */
     g_lain_onEvent = overlay_handle_event;
     LainSpu_SetOutputGain(settings->volume / 100.0f);

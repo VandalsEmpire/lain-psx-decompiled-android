@@ -64,3 +64,13 @@ android {
         }
     }
 }
+
+// AGP 9.5 exposes the APK filename through the public VariantOutput API.
+androidComponents {
+    onVariants(selector().all()) { variant ->
+        variant.outputs.forEach { output ->
+            // Colons are not valid in filenames on Windows; the app label keeps "re:Lain".
+            output.outputFileName.set("re-Lain-${variant.name}.apk")
+        }
+    }
+}

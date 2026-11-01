@@ -7,6 +7,7 @@
 
 #include <SDL.h>
 #include <float.h>
+#include <cmath>
 #include <string.h>
 
 #include "imgui.h"
@@ -41,6 +42,420 @@ static std::vector<PackOption> s_text_packs, s_voice_packs;
 static Uint64 s_mouse_moved_at;  /* last mouse motion (performance counter) */
 static int s_rebind = -1;       /* button waiting for a key, or -1 */
 static bool s_keys_changed;
+
+#if defined(__ANDROID__)
+static void set_menu(bool open);
+extern "C" void PsyX_Pad_SetTouchButtons(unsigned short active_low_mask);
+
+struct TouchFinger {
+    SDL_FingerID id = 0;
+    bool active = false;
+    unsigned short mask = 0;
+};
+static TouchFinger s_touch_fingers[10];
+static unsigned short s_touch_mask = 0xffff;
+
+static void clear_touch_controls(void) {
+    for (TouchFinger &finger : s_touch_fingers) {
+        finger.active = false;
+        finger.mask = 0;
+    }
+    s_touch_mask = 0xffff;
+    PsyX_Pad_SetTouchButtons(s_touch_mask);
+}
+
+static float clamp_touch(float value, float lo, float hi) {
+    return std::max(lo, std::min(value, hi));
+}
+
+static ImVec2 touch_screen_point(float x, float y) {
+    const ImGuiViewport *vp = ImGui::GetMainViewport();
+    return ImVec2(vp->WorkPos.x + x * vp->WorkSize.x,
+                  vp->WorkPos.y + y * vp->WorkSize.y);
+}
+
+struct TouchLayout {
+    ImVec2 dpad[4];       // up, down, left, right
+    ImVec2 face[4];       // triangle, square, circle, cross
+    ImVec2 l2, l1, r1, r2;
+    ImVec2 select, start, menu;
+    ImVec2 dpad_center, face_center;
+    float dpad_half;
+    float face_radius;
+    float shoulder_half_w;
+    float shoulder_half_h;
+    float pill_half_w;
+    float pill_half_h;
+};
+
+static bool s_touch_edit_layout;
+static bool s_layout_drag_active;
+static SDL_FingerID s_layout_drag_finger;
+static int s_layout_drag_item = -1;
+
+static void reset_touch_layout(Settings *s) {
+    static const float defaults[14][2] = {
+        {0.150f, 0.674f}, {0.150f, 0.836f}, {0.105f, 0.755f}, {0.195f, 0.755f},
+        {0.850f, 0.670f}, {0.803f, 0.755f}, {0.897f, 0.755f}, {0.850f, 0.840f},
+        {0.115f, 0.190f}, {0.295f, 0.190f}, {0.705f, 0.190f}, {0.885f, 0.190f},
+        {0.435f, 0.910f}, {0.565f, 0.910f},
+    };
+    memcpy(s->touch_layout, defaults, sizeof defaults);
+    s->touch_scale = 1.0f;
+    settings_save(s);
+}
+
+static TouchLayout touch_layout(void) {
+    const float h = ImGui::GetMainViewport()->WorkSize.y;
+    const float scale = s_settings ? clamp_touch(s_settings->touch_scale, 0.70f, 1.55f) : 1.0f;
+    TouchLayout l{};
+    const float (*p)[2] = s_settings ? s_settings->touch_layout : nullptr;
+    static const float defaults[14][2] = {
+        {0.150f, 0.674f}, {0.150f, 0.836f}, {0.105f, 0.755f}, {0.195f, 0.755f},
+        {0.850f, 0.670f}, {0.803f, 0.755f}, {0.897f, 0.755f}, {0.850f, 0.840f},
+        {0.115f, 0.190f}, {0.295f, 0.190f}, {0.705f, 0.190f}, {0.885f, 0.190f},
+        {0.435f, 0.910f}, {0.565f, 0.910f},
+    };
+    ImVec2 *points[14] = {
+        &l.dpad[0], &l.dpad[1], &l.dpad[2], &l.dpad[3],
+        &l.face[0], &l.face[1], &l.face[2], &l.face[3],
+        &l.l2, &l.l1, &l.r1, &l.r2, &l.select, &l.start,
+    };
+    for (int i = 0; i < 14; i++) {
+        const float x = p ? p[i][0] : defaults[i][0];
+        const float y = p ? p[i][1] : defaults[i][1];
+        *points[i] = touch_screen_point(x, y);
+    }
+    for (int i = 0; i < 4; i++) {
+        l.dpad_center.x += l.dpad[i].x * 0.25f;
+        l.dpad_center.y += l.dpad[i].y * 0.25f;
+        l.face_center.x += l.face[i].x * 0.25f;
+        l.face_center.y += l.face[i].y * 0.25f;
+    }
+    l.dpad_half = clamp_touch(h * 0.052f, 20.0f, 48.0f) * scale;
+    l.face_radius = clamp_touch(h * 0.055f, 23.0f, 52.0f) * scale;
+    l.shoulder_half_w = clamp_touch(h * 0.070f, 29.0f, 66.0f) * scale;
+    l.shoulder_half_h = clamp_touch(h * 0.040f, 17.0f, 32.0f) * scale;
+    l.pill_half_w = clamp_touch(h * 0.092f, 39.0f, 82.0f) * scale;
+    l.pill_half_h = clamp_touch(h * 0.030f, 14.0f, 25.0f) * scale;
+    l.menu = touch_screen_point(0.925f, 0.075f);
+    return l;
+}
+
+static bool touch_in_rect(const ImVec2 &p, const ImVec2 &center, float half_w, float half_h) {
+    return std::abs(p.x - center.x) <= half_w && std::abs(p.y - center.y) <= half_h;
+}
+
+static int touch_layout_target_at(float nx, float ny) {
+    const TouchLayout l = touch_layout();
+    const ImVec2 p = touch_screen_point(nx, ny);
+    const ImVec2 *centers[14] = {
+        &l.dpad[0], &l.dpad[1], &l.dpad[2], &l.dpad[3],
+        &l.face[0], &l.face[1], &l.face[2], &l.face[3],
+        &l.l2, &l.l1, &l.r1, &l.r2, &l.select, &l.start,
+    };
+    const float radii[14] = {
+        l.dpad_half * 1.65f, l.dpad_half * 1.65f, l.dpad_half * 1.65f, l.dpad_half * 1.65f,
+        l.face_radius * 1.65f, l.face_radius * 1.65f, l.face_radius * 1.65f, l.face_radius * 1.65f,
+        l.shoulder_half_w, l.shoulder_half_w, l.shoulder_half_w, l.shoulder_half_w,
+        l.pill_half_w * 0.60f, l.pill_half_w * 0.60f,
+    };
+    int best = -1;
+    float best_d2 = 0.0f;
+    for (int i = 0; i < 14; i++) {
+        const float dx = p.x - centers[i]->x, dy = p.y - centers[i]->y;
+        const float d2 = dx * dx + dy * dy;
+        if (d2 <= radii[i] * radii[i] && (best < 0 || d2 < best_d2)) {
+            best = i;
+            best_d2 = d2;
+        }
+    }
+    return best;
+}
+
+static void move_touch_layout_item(int item, float nx, float ny) {
+    if (!s_settings || item < 0 || item >= 14) return;
+    /* Each visible pad element is independently movable over almost the full screen. */
+    s_settings->touch_layout[item][0] = clamp_touch(nx, 0.035f, 0.965f);
+    s_settings->touch_layout[item][1] = clamp_touch(ny, 0.065f, 0.935f);
+}
+
+static void draw_touch_edit_anchor(ImDrawList *draw, ImVec2 p, const char *label, float scale) {
+    const float r = 14.0f * scale;
+    draw->AddCircleFilled(p, r, IM_COL32(0, 190, 205, 185), 24);
+    draw->AddCircle(p, r, IM_COL32(205, 255, 255, 245), 24, 2.0f);
+    draw->AddLine(ImVec2(p.x - r * 0.55f, p.y), ImVec2(p.x + r * 0.55f, p.y), IM_COL32(255,255,255,230), 2.0f);
+    draw->AddLine(ImVec2(p.x, p.y - r * 0.55f), ImVec2(p.x, p.y + r * 0.55f), IM_COL32(255,255,255,230), 2.0f);
+    const ImVec2 sz = ImGui::GetFont()->CalcTextSizeA(13.0f * scale, FLT_MAX, 0.0f, label);
+    draw->AddRectFilled(ImVec2(p.x - sz.x * 0.5f - 6.0f, p.y - r - sz.y - 8.0f),
+                         ImVec2(p.x + sz.x * 0.5f + 6.0f, p.y - r - 3.0f),
+                         IM_COL32(0, 0, 0, 190), 5.0f);
+    draw->AddText(ImGui::GetFont(), 13.0f * scale,
+                  ImVec2(p.x - sz.x * 0.5f, p.y - r - sz.y - 5.0f),
+                  IM_COL32(230, 250, 255, 255), label);
+}
+
+static unsigned short touch_button_at(float nx, float ny) {
+    const TouchLayout l = touch_layout();
+    const ImVec2 p = touch_screen_point(nx, ny);
+    unsigned short mask = 0;
+    const unsigned short dpad_bits[4] = {0x0010, 0x0040, 0x0080, 0x0020};
+    for (int i = 0; i < 4; i++) {
+        if (touch_in_rect(p, l.dpad[i], l.dpad_half, l.dpad_half)) mask |= dpad_bits[i];
+    }
+    const unsigned short face_bits[4] = {0x1000, 0x8000, 0x2000, 0x4000};
+    for (int i = 0; i < 4; i++) {
+        const float dx = p.x - l.face[i].x, dy = p.y - l.face[i].y;
+        const float hit_r = l.face_radius * 1.18f;
+        if (dx * dx + dy * dy <= hit_r * hit_r) mask |= face_bits[i];
+    }
+    if (touch_in_rect(p, l.l2, l.shoulder_half_w, l.shoulder_half_h)) mask |= 0x0100;
+    if (touch_in_rect(p, l.l1, l.shoulder_half_w, l.shoulder_half_h)) mask |= 0x0400;
+    if (touch_in_rect(p, l.r1, l.shoulder_half_w, l.shoulder_half_h)) mask |= 0x0800;
+    if (touch_in_rect(p, l.r2, l.shoulder_half_w, l.shoulder_half_h)) mask |= 0x0200;
+    if (touch_in_rect(p, l.select, l.pill_half_w, l.pill_half_h)) mask |= 0x0001;
+    if (touch_in_rect(p, l.start, l.pill_half_w, l.pill_half_h)) mask |= 0x0008;
+    return mask;
+}
+
+static void recompute_touch_mask(void) {
+    unsigned short mask = 0xffff;
+    for (const TouchFinger &finger : s_touch_fingers) {
+        if (finger.active) mask &= (unsigned short)~finger.mask;
+    }
+    s_touch_mask = mask;
+    PsyX_Pad_SetTouchButtons(mask);
+}
+
+static void draw_touch_pill(ImDrawList *draw, ImVec2 center, float half_w, float half_h,
+                            const char *label, unsigned short bit, float font_scale = 0.34f) {
+    const bool pressed = bit != 0 && (s_touch_mask & bit) == 0;
+    const ImU32 fill = pressed ? IM_COL32(50, 175, 190, 175) : IM_COL32(12, 20, 30, 120);
+    const ImU32 edge = pressed ? IM_COL32(125, 235, 240, 235) : IM_COL32(155, 185, 200, 135);
+    const float rounding = half_h * 0.82f;
+    draw->AddRectFilled(ImVec2(center.x - half_w, center.y - half_h),
+                        ImVec2(center.x + half_w, center.y + half_h), fill, rounding);
+    draw->AddRect(ImVec2(center.x - half_w, center.y - half_h),
+                  ImVec2(center.x + half_w, center.y + half_h), edge, rounding, 0, 1.5f);
+    const float font_size = std::max(10.0f, half_h * font_scale * 2.0f);
+    const ImVec2 size = ImGui::GetFont()->CalcTextSizeA(font_size, FLT_MAX, 0.0f, label);
+    draw->AddText(ImGui::GetFont(), font_size,
+                  ImVec2(center.x - size.x * 0.5f, center.y - size.y * 0.5f),
+                  IM_COL32(235, 245, 250, 235), label);
+}
+
+static void draw_dpad_arrow(ImDrawList *draw, ImVec2 center, float half, int direction, bool pressed) {
+    const ImU32 color = pressed ? IM_COL32(245, 255, 255, 255) : IM_COL32(205, 220, 230, 220);
+    const float length = half * 0.55f;
+    const float wing = half * 0.27f;
+    ImVec2 a, tip, b, c;
+    if (direction == 0) { // up
+        a = ImVec2(center.x, center.y + length * 0.45f);
+        tip = ImVec2(center.x, center.y - length * 0.55f);
+        b = ImVec2(center.x - wing, center.y - length * 0.12f);
+        c = ImVec2(center.x + wing, center.y - length * 0.12f);
+    } else if (direction == 1) { // down
+        a = ImVec2(center.x, center.y - length * 0.45f);
+        tip = ImVec2(center.x, center.y + length * 0.55f);
+        b = ImVec2(center.x - wing, center.y + length * 0.12f);
+        c = ImVec2(center.x + wing, center.y + length * 0.12f);
+    } else if (direction == 2) { // left
+        a = ImVec2(center.x + length * 0.45f, center.y);
+        tip = ImVec2(center.x - length * 0.55f, center.y);
+        b = ImVec2(center.x - length * 0.12f, center.y - wing);
+        c = ImVec2(center.x - length * 0.12f, center.y + wing);
+    } else { // right
+        a = ImVec2(center.x - length * 0.45f, center.y);
+        tip = ImVec2(center.x + length * 0.55f, center.y);
+        b = ImVec2(center.x + length * 0.12f, center.y - wing);
+        c = ImVec2(center.x + length * 0.12f, center.y + wing);
+    }
+    draw->AddLine(a, tip, color, 3.0f);
+    draw->AddLine(tip, b, color, 3.0f);
+    draw->AddLine(tip, c, color, 3.0f);
+}
+
+static void draw_dpad_cap(ImDrawList *draw, ImVec2 center, float half, const char *id,
+                          unsigned short bit, int direction) {
+    const bool pressed = (s_touch_mask & bit) == 0;
+    const ImU32 fill = pressed ? IM_COL32(55, 190, 205, 205) : IM_COL32(17, 27, 39, 205);
+    const ImU32 edge = pressed ? IM_COL32(135, 245, 250, 245) : IM_COL32(135, 175, 195, 180);
+    draw->AddRectFilled(ImVec2(center.x - half, center.y - half),
+                        ImVec2(center.x + half, center.y + half), fill, half * 0.25f);
+    draw->AddRect(ImVec2(center.x - half, center.y - half),
+                  ImVec2(center.x + half, center.y + half), edge, half * 0.25f, 0, 1.6f);
+    draw_dpad_arrow(draw, center, half, direction, pressed);
+    (void)id;
+}
+
+static void draw_face_button(ImDrawList *draw, ImVec2 center, float radius,
+                             int shape, unsigned short bit, ImU32 symbol_color) {
+    const bool pressed = (s_touch_mask & bit) == 0;
+    const ImU32 fill = pressed ? IM_COL32(45, 165, 180, 205) : IM_COL32(13, 23, 35, 188);
+    const ImU32 edge = pressed ? IM_COL32(145, 245, 250, 245) : IM_COL32(155, 195, 210, 190);
+    draw->AddCircleFilled(center, radius, fill, 32);
+    draw->AddCircle(center, radius, edge, 32, 1.8f);
+    if (pressed) symbol_color = IM_COL32(235, 255, 255, 255);
+    const float r = radius * 0.43f;
+    if (shape == 0) { // triangle
+        draw->AddTriangle(ImVec2(center.x, center.y - r),
+                          ImVec2(center.x - r * 0.88f, center.y + r * 0.70f),
+                          ImVec2(center.x + r * 0.88f, center.y + r * 0.70f),
+                          symbol_color, 2.7f);
+    } else if (shape == 1) { // square
+        draw->AddRect(ImVec2(center.x - r * 0.78f, center.y - r * 0.78f),
+                      ImVec2(center.x + r * 0.78f, center.y + r * 0.78f),
+                      symbol_color, 1.0f, 0, 2.7f);
+    } else if (shape == 2) { // circle
+        draw->AddCircle(center, r * 0.85f, symbol_color, 28, 2.7f);
+    } else { // cross
+        draw->AddLine(ImVec2(center.x - r * 0.72f, center.y - r * 0.72f),
+                      ImVec2(center.x + r * 0.72f, center.y + r * 0.72f), symbol_color, 3.0f);
+        draw->AddLine(ImVec2(center.x + r * 0.72f, center.y - r * 0.72f),
+                      ImVec2(center.x - r * 0.72f, center.y + r * 0.72f), symbol_color, 3.0f);
+    }
+}
+
+static void draw_touch_controls(const ImGuiViewport *vp, bool buttons_enabled) {
+    ImDrawList *draw = ImGui::GetForegroundDrawList();
+    const TouchLayout l = touch_layout();
+    const float scale = s_settings ? clamp_touch(s_settings->touch_scale, 0.70f, 1.55f) : 1.0f;
+
+    if (buttons_enabled) {
+        const float pad_r = clamp_touch(vp->WorkSize.y * 0.178f, 78.0f, 142.0f) * scale;
+        const ImU32 pad_fill = IM_COL32(5, 13, 24, 42);
+        const ImU32 pad_edge = IM_COL32(110, 160, 185, 55);
+        draw->AddCircleFilled(l.dpad_center, pad_r, pad_fill, 48);
+        draw->AddCircle(l.dpad_center, pad_r, pad_edge, 48, 1.5f);
+        draw->AddCircleFilled(l.face_center, pad_r, pad_fill, 48);
+        draw->AddCircle(l.face_center, pad_r, pad_edge, 48, 1.5f);
+
+        draw_dpad_cap(draw, l.dpad[0], l.dpad_half, "up", 0x0010, 0);
+        draw_dpad_cap(draw, l.dpad[1], l.dpad_half, "down", 0x0040, 1);
+        draw_dpad_cap(draw, l.dpad[2], l.dpad_half, "left", 0x0080, 2);
+        draw_dpad_cap(draw, l.dpad[3], l.dpad_half, "right", 0x0020, 3);
+
+        draw_face_button(draw, l.face[0], l.face_radius, 0, 0x1000, IM_COL32(85, 205, 145, 235)); // triangle
+        draw_face_button(draw, l.face[1], l.face_radius, 1, 0x8000, IM_COL32(225, 105, 165, 235)); // square
+        draw_face_button(draw, l.face[2], l.face_radius, 2, 0x2000, IM_COL32(235, 95, 95, 235)); // circle
+        draw_face_button(draw, l.face[3], l.face_radius, 3, 0x4000, IM_COL32(95, 160, 240, 235)); // cross
+
+        draw_touch_pill(draw, l.l2, l.shoulder_half_w, l.shoulder_half_h, "L2", 0x0100, 0.30f);
+        draw_touch_pill(draw, l.l1, l.shoulder_half_w, l.shoulder_half_h, "L1", 0x0400, 0.30f);
+        draw_touch_pill(draw, l.r1, l.shoulder_half_w, l.shoulder_half_h, "R1", 0x0800, 0.30f);
+        draw_touch_pill(draw, l.r2, l.shoulder_half_w, l.shoulder_half_h, "R2", 0x0200, 0.30f);
+        draw_touch_pill(draw, l.select, l.pill_half_w, l.pill_half_h, "SELECT", 0x0001, 0.29f);
+        draw_touch_pill(draw, l.start, l.pill_half_w, l.pill_half_h, "START", 0x0008, 0.29f);
+    }
+
+    if (s_touch_edit_layout) {
+        static const char *const names[14] = {
+            "UP", "DOWN", "LEFT", "RIGHT", "TRIANGLE", "SQUARE", "CIRCLE", "CROSS",
+            "L2", "L1", "R1", "R2", "SELECT", "START",
+        };
+        const ImVec2 *points[14] = {
+            &l.dpad[0], &l.dpad[1], &l.dpad[2], &l.dpad[3],
+            &l.face[0], &l.face[1], &l.face[2], &l.face[3],
+            &l.l2, &l.l1, &l.r1, &l.r2, &l.select, &l.start,
+        };
+        for (int i = 0; i < 14; i++) draw_touch_edit_anchor(draw, *points[i], names[i], scale);
+        const ImVec2 info(18.0f, 18.0f);
+        const char *hint = "EDIT LAYOUT - drag any button independently; DONE saves";
+        const ImVec2 size = ImGui::GetFont()->CalcTextSizeA(16.0f * scale, FLT_MAX, 0.0f, hint);
+        draw->AddRectFilled(info, ImVec2(info.x + size.x + 18.0f * scale,
+                                         info.y + size.y + 12.0f * scale), IM_COL32(0, 0, 0, 175), 6.0f);
+        draw->AddText(ImGui::GetFont(), 16.0f * scale, ImVec2(info.x + 9.0f * scale, info.y + 6.0f * scale),
+                      IM_COL32(225, 250, 255, 255), hint);
+        const ImVec2 done = touch_screen_point(0.925f, 0.075f);
+        draw_touch_pill(draw, done, clamp_touch(vp->WorkSize.y * 0.080f, 38.0f, 70.0f) * scale,
+                        clamp_touch(vp->WorkSize.y * 0.034f, 17.0f, 28.0f) * scale,
+                        "DONE", 0, 0.30f);
+    } else {
+        const float menu_half_w = clamp_touch(vp->WorkSize.y * 0.072f, 32.0f, 62.0f) * scale;
+        const float menu_half_h = clamp_touch(vp->WorkSize.y * 0.030f, 14.0f, 25.0f) * scale;
+        draw_touch_pill(draw, l.menu, menu_half_w, menu_half_h, "MENU", 0, 0.30f);
+    }
+}
+
+static bool handle_touch_event(const SDL_Event *e) {
+    if (!s_ready || !s_settings) return false;
+    if (e->type != SDL_FINGERDOWN && e->type != SDL_FINGERMOTION && e->type != SDL_FINGERUP) return false;
+    if (s_menu) return false;
+
+    if (s_touch_edit_layout) {
+        if (e->type == SDL_FINGERDOWN) {
+            const ImVec2 done = touch_screen_point(0.925f, 0.075f);
+            const ImVec2 p = touch_screen_point(e->tfinger.x, e->tfinger.y);
+            if (touch_in_rect(p, done, 112.0f, 56.0f)) {
+                s_touch_edit_layout = false;
+                s_layout_drag_active = false;
+                s_layout_drag_item = -1;
+                settings_save(s_settings);
+                return true;
+            }
+            const int target = touch_layout_target_at(e->tfinger.x, e->tfinger.y);
+            if (target >= 0) {
+                s_layout_drag_active = true;
+                s_layout_drag_finger = e->tfinger.fingerId;
+                s_layout_drag_item = target;
+                move_touch_layout_item(target, e->tfinger.x, e->tfinger.y);
+            }
+            return true; /* swallow all touches while editing */
+        }
+        if (s_layout_drag_active && e->tfinger.fingerId == s_layout_drag_finger) {
+            if (e->type == SDL_FINGERUP) {
+                s_layout_drag_active = false;
+                s_layout_drag_item = -1;
+                settings_save(s_settings);
+            } else {
+                move_touch_layout_item(s_layout_drag_item, e->tfinger.x, e->tfinger.y);
+            }
+            return true;
+        }
+        return true;
+    }
+
+    if (e->type == SDL_FINGERDOWN) {
+        const TouchLayout l = touch_layout();
+        const ImVec2 p = touch_screen_point(e->tfinger.x, e->tfinger.y);
+        const float menu_scale = s_settings ? clamp_touch(s_settings->touch_scale, 0.70f, 1.55f) : 1.0f;
+        const float menu_w = clamp_touch(ImGui::GetMainViewport()->WorkSize.y * 0.085f, 38.0f, 72.0f) * menu_scale;
+        const float menu_h = clamp_touch(ImGui::GetMainViewport()->WorkSize.y * 0.040f, 18.0f, 32.0f) * menu_scale;
+        // Keep the MENU button available even when the player hides the controls.
+        if (touch_in_rect(p, l.menu, menu_w, menu_h)) {
+            clear_touch_controls();
+            set_menu(true);
+            return true;
+        }
+        if (!s_settings->touch_controls) return false;
+        TouchFinger *slot = nullptr;
+        for (TouchFinger &finger : s_touch_fingers) {
+            if (finger.active && finger.id == e->tfinger.fingerId) { slot = &finger; break; }
+            if (!finger.active && !slot) slot = &finger;
+        }
+        if (!slot) return false;
+        slot->id = e->tfinger.fingerId;
+        slot->mask = touch_button_at(e->tfinger.x, e->tfinger.y);
+        slot->active = slot->mask != 0;
+        recompute_touch_mask();
+        return slot->active;
+    }
+
+    for (TouchFinger &finger : s_touch_fingers) {
+        if (finger.active && finger.id == e->tfinger.fingerId) {
+            if (e->type == SDL_FINGERUP) {
+                finger.active = false;
+                finger.mask = 0;
+            } else {
+                finger.mask = touch_button_at(e->tfinger.x, e->tfinger.y);
+            }
+            recompute_touch_mask();
+            return true;
+        }
+    }
+    return false;
+}
+#endif
 
 static bool overlay_init(void) {
     SDL_Window *win = SDL_GL_GetCurrentWindow();
@@ -113,6 +528,9 @@ static void set_menu(bool open) {
     }
     s_menu = open;
     s_rebind = -1;
+#if defined(__ANDROID__)
+    if (open) clear_touch_controls();
+#endif
     if (open) {
         s_menu_focus = true;
         if (s_ready) {
@@ -128,6 +546,16 @@ static void set_menu(bool open) {
 
 extern "C" int overlay_handle_event(const union SDL_Event *ev) {
     const SDL_Event *e = (const SDL_Event *)ev;
+#if defined(__ANDROID__)
+    if (e->type == SDL_WINDOWEVENT && e->window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
+        clear_touch_controls();
+    }
+    if (handle_touch_event(e)) return 1;
+    if (s_menu && (e->type == SDL_FINGERDOWN || e->type == SDL_FINGERUP || e->type == SDL_FINGERMOTION) && s_ready) {
+        ImGui_ImplSDL2_ProcessEvent(e);
+        return 1;
+    }
+#endif
     if (e->type == SDL_MOUSEMOTION) {
         s_mouse_moved_at = SDL_GetPerformanceCounter();
     }
@@ -236,6 +664,9 @@ static void draw_menu(const ImGuiViewport *vp) {
                 apply |= OVERLAY_APPLY_VIDEO;
             }
             note_focus("VSync");
+#if defined(__ANDROID__)
+            ImGui::TextDisabled("Smooth motion (60 fps) is disabled on Android to avoid rendering artifacts.");
+#else
             bool smooth = s->smooth != 0;
             if (ImGui::Checkbox("Smooth motion (60 fps)", &smooth)) {
                 s->smooth = smooth;
@@ -244,6 +675,7 @@ static void draw_menu(const ImGuiViewport *vp) {
             note_focus("Smooth motion");
             ImGui::SameLine();
             ImGui::TextDisabled(s->smooth ? "(in-between frames; game speed unchanged)" : "(original frame rate)");
+#endif
             if (ImGui::SliderInt("Render scale", &s->render_scale, 0, 8, s->render_scale ? "%dx" : "Auto")) {
                 apply |= OVERLAY_APPLY_VIDEO;
             }
@@ -269,6 +701,28 @@ static void draw_menu(const ImGuiViewport *vp) {
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("Controls")) {
+#if defined(__ANDROID__)
+            bool touch = s->touch_controls != 0;
+            if (ImGui::Checkbox("Show touch controls", &touch)) {
+                s->touch_controls = touch;
+                settings_save(s);
+                if (!touch) clear_touch_controls();
+            }
+            note_focus("Show touch controls");
+            ImGui::Spacing();
+            if (ImGui::SliderFloat("Touch control size", &s->touch_scale, 0.70f, 1.55f, "%.2fx")) {
+                settings_save(s);
+            }
+            if (ImGui::Button("Edit touch layout", ImVec2(220.0f * ui, 42.0f * ui))) {
+                s_touch_edit_layout = true;
+                s_layout_drag_active = false;
+                open = false;
+            }
+            if (ImGui::Button("Reset touch layout", ImVec2(220.0f * ui, 42.0f * ui))) {
+                reset_touch_layout(s);
+            }
+            ImGui::TextWrapped("In layout mode, drag each D-pad direction, face button, shoulder and Start/Select independently. Tap DONE to save.");
+#endif
             static const char *const labels[SETTINGS_NUM_KEYS] = {
                 "Up", "Down", "Left", "Right", "Cross", "Circle", "Square", "Triangle",
                 "L1", "L2", "L3", "R1", "R2", "R3", "Start", "Select",
@@ -469,7 +923,14 @@ extern "C" void overlay_draw(void) {
     if (s_text[0] && SDL_GetPerformanceCounter() >= s_until) {
         s_text[0] = 0;
     }
-    if (!s_text[0] && !s_sub[0] && !s_menu && !modrt_wants_draw()) {
+#if defined(__ANDROID__)
+    const bool show_touch_controls = s_settings && (s_settings->touch_controls || s_touch_edit_layout);
+    const bool show_touch_menu = s_settings != nullptr;
+#else
+    const bool show_touch_controls = false;
+    const bool show_touch_menu = false;
+#endif
+    if (!s_text[0] && !s_sub[0] && !s_menu && !modrt_wants_draw() && !show_touch_menu) {
         return;
     }
     if (!s_ready) {
@@ -495,6 +956,9 @@ extern "C" void overlay_draw(void) {
         draw_subtitle(vp);
     }
     modrt_draw(); /* mod windows and overlays */
+#if defined(__ANDROID__)
+    if (show_touch_menu && !s_menu) draw_touch_controls(vp, show_touch_controls);
+#endif
     if (s_menu) {
         draw_menu(vp);
     }

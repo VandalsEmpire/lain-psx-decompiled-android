@@ -11,11 +11,13 @@
         android:required="false" />
 
     <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.INTERNET" />
 
     <application
         android:allowBackup="false"
-        android:label="Serial Experiments Lain"
-        android:icon="@mipmap/ic_launcher"
+        android:label="re:Lain"
+        android:icon="@mipmap/lain_launcher"
+        android:roundIcon="@mipmap/lain_launcher"
         android:theme="@style/AppTheme"
         android:hardwareAccelerated="true">
         <activity

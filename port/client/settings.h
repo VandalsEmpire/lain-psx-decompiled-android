@@ -22,6 +22,9 @@ typedef struct {
      * "-folder" (off), separated by '|'. Folders not listed are new: on, last. */
     char mods[2048];
     int dump_textures;    /* save every picture the game draws, for texture packs */
+    int touch_controls;   /* Android virtual PlayStation controls; enabled by default on Android */
+    float touch_layout[14][2]; /* up/down/left/right, Triangle/Square/Circle/Cross, L2/L1/R1/R2, Select/Start */
+    float touch_scale;    /* virtual control size multiplier */
     /* Keyboard mapping: SDL key names (e.g. "Return", "C", "Up") for the pad
      * buttons, in SETTINGS_KEY_NAMES order; stored as key_<button> = <name>. */
     char keys[16][32];
