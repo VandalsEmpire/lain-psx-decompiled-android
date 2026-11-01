@@ -29,6 +29,7 @@ std::string g_picked_disc_path;
 bool g_picker_result_ready = false;
 std::mutex g_subtitle_mutex;
 std::string g_subtitle_result_message;
+std::string g_subtitle_result_code;
 int g_subtitle_result_count = 0;
 bool g_subtitle_result_ready = false;
 
@@ -79,7 +80,7 @@ bool take_android_picker_result(std::string &path) {
     return true;
 }
 
-bool request_android_english_subtitles(const char *data_dir) {
+bool request_android_subtitles(const char *data_dir, const char *method_name) {
     JNIEnv *env = static_cast<JNIEnv *>(SDL_AndroidGetJNIEnv());
     jobject activity = static_cast<jobject>(SDL_AndroidGetActivity());
     if (!env || !activity) {
@@ -88,7 +89,7 @@ bool request_android_english_subtitles(const char *data_dir) {
     }
     jclass activity_class = env->GetObjectClass(activity);
     jmethodID method = activity_class
-        ? env->GetMethodID(activity_class, "downloadEnglishSubtitles", "(Ljava/lang/String;)V")
+        ? env->GetMethodID(activity_class, method_name, "(Ljava/lang/String;)V")
         : nullptr;
     if (env->ExceptionCheck()) env->ExceptionClear();
     bool ok = method != nullptr;
@@ -108,9 +109,11 @@ bool request_android_english_subtitles(const char *data_dir) {
     return ok;
 }
 
-bool take_english_subtitle_result(int &count, std::string &message) {
+bool take_android_subtitle_result(std::string &code, int &count, std::string &message) {
     std::lock_guard<std::mutex> lock(g_subtitle_mutex);
     if (!g_subtitle_result_ready) return false;
+    code.swap(g_subtitle_result_code);
+    g_subtitle_result_code.clear();
     count = g_subtitle_result_count;
     message.swap(g_subtitle_result_message);
     g_subtitle_result_message.clear();
@@ -150,14 +153,20 @@ Java_org_libsdl_app_LainActivity_nativeOnModFolderImported(JNIEnv *env, jclass,
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_org_libsdl_app_LainActivity_nativeOnEnglishSubtitlesDownloaded(JNIEnv *env, jclass,
-                                                                     jint subtitle_count, jstring message) {
-    std::string status;
+Java_org_libsdl_app_LainActivity_nativeOnSubtitlesDownloaded(JNIEnv *env, jclass,
+                                                              jstring code, jint subtitle_count,
+                                                              jstring message) {
+    std::string pack_code, status;
+    if (code) {
+        const char *chars = env->GetStringUTFChars(code, nullptr);
+        if (chars) { pack_code = chars; env->ReleaseStringUTFChars(code, chars); }
+    }
     if (message) {
         const char *chars = env->GetStringUTFChars(message, nullptr);
         if (chars) { status = chars; env->ReleaseStringUTFChars(message, chars); }
     }
     std::lock_guard<std::mutex> lock(g_subtitle_mutex);
+    g_subtitle_result_code = std::move(pack_code);
     g_subtitle_result_count = (int)subtitle_count;
     g_subtitle_result_message = std::move(status);
     g_subtitle_result_ready = true;
@@ -489,11 +498,11 @@ extern "C" int setup_ui_run(Settings *settings) {
             job.state = IMPORT_IDLE;
         }
         int subtitle_count = 0;
-        std::string downloaded_subtitles;
-        if (take_english_subtitle_result(subtitle_count, downloaded_subtitles)) {
+        std::string subtitle_code, downloaded_subtitles;
+        if (take_android_subtitle_result(subtitle_code, subtitle_count, downloaded_subtitles)) {
             subtitles_waiting = false;
             subtitle_message = downloaded_subtitles;
-            if (subtitle_count > 0) SDL_Log("re:Lain: installed %d English subtitle files", subtitle_count);
+            if (subtitle_count > 0) SDL_Log("re:Lain: installed %d subtitle tracks for %s", subtitle_count, subtitle_code.c_str());
         }
 
         ImGui_ImplOpenGL3_NewFrame();
@@ -554,13 +563,25 @@ extern "C" int setup_ui_run(Settings *settings) {
                 ImGui::EndTabItem();
             }
             if (ImGui::BeginTabItem("Subtitles")) {
+                ImGui::SeparatorText("Português brasileiro");
+                ImGui::TextWrapped("Baixe as legendas comunitárias PT-BR do projeto lainTSX. Os arquivos WebVTT são convertidos para SRT e instalados no pacote de idioma do re:Lain.");
+                ImGui::BeginDisabled(subtitles_waiting);
+                if (ImGui::Button("Baixar legendas PT-BR", ImVec2(320.0f * ui_scale, 58.0f * ui_scale))) {
+                    if (request_android_subtitles(settings_data_dir(), "downloadPortugueseSubtitles")) {
+                        subtitles_waiting = true;
+                        subtitle_message = "Baixando e convertendo as legendas PT-BR do GitHub...";
+                    } else {
+                        subtitle_message = "Não foi possível iniciar o serviço de download PT-BR.";
+                    }
+                }
+                ImGui::EndDisabled();
+                ImGui::Spacing();
                 ImGui::SeparatorText("English fan subtitles");
                 ImGui::TextWrapped("Download the completed timed English subtitle set from laingame.net's public source repository.");
-                ImGui::TextDisabled("The subtitles are optional and are not bundled with re:Lain.");
-                ImGui::Spacing();
+                ImGui::TextDisabled("Subtitle packs are optional and are not bundled with re:Lain.");
                 ImGui::BeginDisabled(subtitles_waiting);
                 if (ImGui::Button("Download English subtitles", ImVec2(320.0f * ui_scale, 58.0f * ui_scale))) {
-                    if (request_android_english_subtitles(settings_data_dir())) {
+                    if (request_android_subtitles(settings_data_dir(), "downloadEnglishSubtitles")) {
                         subtitles_waiting = true;
                         subtitle_message = "Connecting to GitHub and installing the subtitle files...";
                     } else {
@@ -568,13 +589,13 @@ extern "C" int setup_ui_run(Settings *settings) {
                     }
                 }
                 ImGui::EndDisabled();
-                if (subtitles_waiting) ImGui::TextDisabled("Downloading and checking subtitle files...");
+                if (subtitles_waiting) ImGui::TextDisabled("Downloading, converting and checking subtitle files...");
                 if (!subtitle_message.empty()) {
                     ImGui::Spacing();
                     ImGui::TextWrapped("%s", subtitle_message.c_str());
                 }
                 ImGui::Spacing();
-                ImGui::TextWrapped("After starting the game, open F1 > Settings > Text / subtitles and select English (laingame.net fan subtitles).");
+                ImGui::TextWrapped("After starting the game, open F1 > Settings > Text / subtitles and select Português brasileiro or English (laingame.net fan subtitles). The original Japanese is always available.");
                 ImGui::EndTabItem();
             }
             if (ImGui::BeginTabItem("Unused")) {

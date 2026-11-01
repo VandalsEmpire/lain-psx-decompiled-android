@@ -17,13 +17,22 @@ target_include_directories(psx PUBLIC include include/psx)
 target_compile_definitions(psx PUBLIC USE_PGXP=0)
 # macOS/BSD: no <malloc.h>; PsyCross headers use static_assert without <assert.h>.
 target_include_directories(psx BEFORE PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../compat)
-target_compile_options(psx PRIVATE
-    $<$<COMPILE_LANGUAGE:C>:-include>
-    $<$<COMPILE_LANGUAGE:C>:${CMAKE_CURRENT_SOURCE_DIR}/android_preinclude.h>
-    $<$<COMPILE_LANGUAGE:CXX>:-Wno-c++11-narrowing>
-    $<$<COMPILE_LANGUAGE:CXX>:-include>
-    $<$<COMPILE_LANGUAGE:CXX>:${CMAKE_CURRENT_SOURCE_DIR}/android_preinclude_cpp.h>
-)
+if(ANDROID)
+    # Android NDK needs these compatibility declarations for the PsyCross sources.
+    target_compile_options(psx PRIVATE
+        $<$<COMPILE_LANGUAGE:C>:-include>
+        $<$<COMPILE_LANGUAGE:C>:${CMAKE_CURRENT_SOURCE_DIR}/android_preinclude.h>
+        $<$<COMPILE_LANGUAGE:CXX>:-Wno-c++11-narrowing>
+        $<$<COMPILE_LANGUAGE:CXX>:-include>
+        $<$<COMPILE_LANGUAGE:CXX>:${CMAKE_CURRENT_SOURCE_DIR}/android_preinclude_cpp.h>
+    )
+else()
+    # Keep desktop builds on the original, platform-native standard headers.
+    target_compile_options(psx PRIVATE
+        $<$<COMPILE_LANGUAGE:C>:-include assert.h>
+        $<$<COMPILE_LANGUAGE:CXX>:-Wno-c++11-narrowing>
+    )
+endif()
 
 # SDL2/OpenAL come from the system on desktop, or from source on Android.
 if(ANDROID)

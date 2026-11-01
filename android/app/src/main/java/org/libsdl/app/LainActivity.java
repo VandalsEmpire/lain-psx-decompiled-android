@@ -8,8 +8,10 @@ import android.provider.OpenableColumns;
 import android.provider.DocumentsContract;
 import android.provider.DocumentsContract.Document;
 import android.widget.Toast;
+import android.text.Html;
 
 import java.io.BufferedInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.BufferedOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
@@ -34,7 +36,7 @@ public final class LainActivity extends SDLActivity {
 
     private static native void nativeOnDiscPicked(String absolutePath);
     private static native void nativeOnModFolderImported(String absolutePath, String message);
-    private static native void nativeOnEnglishSubtitlesDownloaded(int subtitleCount, String message);
+    private static native void nativeOnSubtitlesDownloaded(String code, int subtitleCount, String message);
 
     /** Download the completed laingame.net English subtitle pack into the app's language folder. */
     public void downloadEnglishSubtitles(String dataDirectory) {
@@ -170,13 +172,231 @@ public final class LainActivity extends SDLActivity {
             final int installed = subtitleCount;
             final String message = "Installed " + installed + " English subtitle files. In game, choose English in F1 > Settings > Text / subtitles.";
             runOnUiThread(() -> {
-                nativeOnEnglishSubtitlesDownloaded(installed, message);
+                nativeOnSubtitlesDownloaded("en-laingame", installed, message);
                 Toast.makeText(this, "English subtitles installed (" + installed + " files).", Toast.LENGTH_LONG).show();
             });
         } catch (Exception error) {
             final String message = "English subtitle download failed: " + error.getMessage();
             runOnUiThread(() -> {
-                nativeOnEnglishSubtitlesDownloaded(0, message);
+                nativeOnSubtitlesDownloaded("en-laingame", 0, message);
+                Toast.makeText(this, message, Toast.LENGTH_LONG).show();
+            });
+        } finally {
+            if (connection != null) connection.disconnect();
+            if (staging != null) deleteRecursively(staging);
+        }
+    }
+
+
+    /** Download and convert the community PT-BR WebVTT tracks into a native SRT pack. */
+    public void downloadPortugueseSubtitles(String dataDirectory) {
+        COPY_EXECUTOR.execute(() -> downloadPortugueseSubtitlesWorker(dataDirectory));
+    }
+
+    private static long parseVttTimeMillis(String timestamp) throws IOException {
+        String[] parts = timestamp.trim().split(":");
+        int hours;
+        int minutes;
+        String secondsAndMillis;
+        try {
+            if (parts.length == 2) {
+                hours = 0;
+                minutes = Integer.parseInt(parts[0]);
+                secondsAndMillis = parts[1];
+            } else if (parts.length == 3) {
+                hours = Integer.parseInt(parts[0]);
+                minutes = Integer.parseInt(parts[1]);
+                secondsAndMillis = parts[2];
+            } else {
+                throw new IOException("Invalid WebVTT timestamp: " + timestamp);
+            }
+            String[] sec = secondsAndMillis.replace(',', '.').split("\\.", 2);
+            if (sec.length != 2 || sec[1].length() != 3) {
+                throw new IOException("Invalid WebVTT milliseconds: " + timestamp);
+            }
+            int seconds = Integer.parseInt(sec[0]);
+            int millis = Integer.parseInt(sec[1]);
+            if (hours < 0 || minutes < 0 || minutes > 59 || seconds < 0 || seconds > 59
+                    || millis < 0 || millis > 999) {
+                throw new IOException("WebVTT timestamp is out of range: " + timestamp);
+            }
+            return (((hours * 60L + minutes) * 60L + seconds) * 1000L) + millis;
+        } catch (NumberFormatException error) {
+            throw new IOException("Invalid WebVTT timestamp: " + timestamp, error);
+        }
+    }
+
+    private static String formatSrtTime(long timeMillis) {
+        long hours = timeMillis / 3600000L;
+        long minutes = (timeMillis / 60000L) % 60L;
+        long seconds = (timeMillis / 1000L) % 60L;
+        long millis = timeMillis % 1000L;
+        return String.format(Locale.ROOT, "%02d:%02d:%02d,%03d", hours, minutes, seconds, millis);
+    }
+
+    private static String convertPortugueseWebVtt(String source) throws IOException {
+        source = source.replace(String.valueOf((char)0xFEFF), "").replace("\r\n", "\n").replace('\r', '\n');
+        String[] blocks = source.split("\\n[ \\t]*\\n");
+        java.util.ArrayList<String> cues = new java.util.ArrayList<>();
+        for (String block : blocks) {
+            String[] lines = block.split("\\n");
+            if (lines.length == 0) continue;
+            String first = lines[0].trim();
+            if (first.equals("WEBVTT") || first.startsWith("NOTE") || first.startsWith("STYLE")
+                    || first.startsWith("REGION")) continue;
+
+            int timingLine = -1;
+            for (int i = 0; i < lines.length; i++) {
+                if (lines[i].contains("-->")) { timingLine = i; break; }
+            }
+            if (timingLine < 0) continue;
+            String[] timing = lines[timingLine].trim().split("-->", 2);
+            if (timing.length != 2) continue;
+            String startText = timing[0].trim();
+            String[] endParts = timing[1].trim().split("\\s+", 2);
+            if (endParts.length == 0) continue;
+            long start = parseVttTimeMillis(startText);
+            long end = parseVttTimeMillis(endParts[0]);
+            if (end <= start) continue;
+
+            StringBuilder rawText = new StringBuilder();
+            for (int i = timingLine + 1; i < lines.length; i++) {
+                if (rawText.length() != 0) rawText.append('\n');
+                rawText.append(lines[i]);
+            }
+            // WebVTT voice/class/formatting tags are presentation-only in the native SRT renderer.
+            String plain = rawText.toString().replaceAll("<[^>]*>", "");
+            plain = android.text.Html.fromHtml(plain).toString().replace((char)0x00A0, ' ').trim();
+            if (!plain.isEmpty()) {
+                cues.add(formatSrtTime(start) + " --> " + formatSrtTime(end) + "\n" + plain);
+            }
+        }
+        if (cues.isEmpty()) return "";
+        StringBuilder srt = new StringBuilder();
+        for (int i = 0; i < cues.size(); i++) {
+            if (i != 0) srt.append("\n\n");
+            srt.append(i + 1).append('\n').append(cues.get(i));
+        }
+        srt.append('\n');
+        return srt.toString();
+    }
+
+    private void downloadPortugueseSubtitlesWorker(String dataDirectory) {
+        File staging = null;
+        HttpURLConnection connection = null;
+        int subtitleCount = 0;
+        try {
+            if (dataDirectory == null || dataDirectory.isEmpty()) {
+                throw new IOException("The app data folder is unavailable");
+            }
+            File langRoot = new File(dataDirectory, "lang");
+            if (!langRoot.exists() && !langRoot.mkdirs()) {
+                throw new IOException("Could not create the language folder");
+            }
+            staging = new File(langRoot, ".pt-BR-download");
+            deleteRecursively(staging);
+            File content = new File(staging, "content");
+            File subtitles = new File(content, "subtitles");
+            if (!subtitles.mkdirs()) throw new IOException("Could not create the temporary subtitle folder");
+
+            URL url = new URL("https://github.com/laingame-net/lainvtt/archive/refs/heads/main.zip");
+            connection = (HttpURLConnection) url.openConnection();
+            connection.setInstanceFollowRedirects(true);
+            connection.setConnectTimeout(30000);
+            connection.setReadTimeout(60000);
+            connection.setRequestProperty("User-Agent", "re-Lain-Android");
+            connection.setRequestProperty("Accept", "application/zip, application/octet-stream");
+            int response = connection.getResponseCode();
+            if (response < 200 || response >= 300) throw new IOException("GitHub returned HTTP " + response);
+            int declaredLength = connection.getContentLength();
+            if (declaredLength > 128L * 1024L * 1024L) {
+                throw new IOException("The PT-BR subtitle archive is unexpectedly large");
+            }
+
+            long extractedBytes = 0;
+            int seenFiles = 0;
+            java.util.ArrayList<String> indexNames = new java.util.ArrayList<>();
+            try (InputStream raw = new BufferedInputStream(connection.getInputStream());
+                 ZipInputStream zip = new ZipInputStream(raw)) {
+                ZipEntry entry;
+                byte[] buffer = new byte[64 * 1024];
+                while ((entry = zip.getNextEntry()) != null) {
+                    String name = entry.getName().replace('\\', '/');
+                    if (name.startsWith("/") || name.indexOf((char)0) >= 0) {
+                        throw new IOException("The PT-BR archive contains an unsafe path");
+                    }
+                    String[] parts = name.split("/");
+                    if (parts.length != 3 || !parts[1].equals("pt-BR") || entry.isDirectory()) {
+                        zip.closeEntry();
+                        continue;
+                    }
+                    String sourceName = parts[2];
+                    String lowerName = sourceName.toLowerCase(Locale.ROOT);
+                    if (!lowerName.endsWith(".vtt") || !sourceName.matches("[A-Za-z0-9._-]+\\.vtt")) {
+                        zip.closeEntry();
+                        continue;
+                    }
+                    if (++seenFiles > 5000) throw new IOException("The PT-BR pack contains too many files");
+                    java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
+                    int read;
+                    while ((read = zip.read(buffer)) != -1) {
+                        extractedBytes += read;
+                        if (extractedBytes > 64L * 1024L * 1024L) {
+                            throw new IOException("The PT-BR subtitle files exceed the 64 MiB safety limit");
+                        }
+                        bytes.write(buffer, 0, read);
+                    }
+                    String vtt = new String(bytes.toByteArray(), java.nio.charset.StandardCharsets.UTF_8);
+                    if (vtt.startsWith(String.valueOf((char)0xFEFF))) vtt = vtt.substring(1);
+                    String srt = convertPortugueseWebVtt(vtt);
+                    if (!srt.isEmpty()) {
+                        String targetName = sourceName.substring(0, sourceName.length() - 4) + ".srt";
+                        File output = new File(subtitles, targetName);
+                        try (FileOutputStream out = new FileOutputStream(output, false)) {
+                            out.write(srt.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                        }
+                        indexNames.add(targetName);
+                        subtitleCount++;
+                    }
+                    zip.closeEntry();
+                }
+            }
+            if (subtitleCount == 0) throw new IOException("No valid PT-BR WebVTT subtitle tracks were found");
+            java.util.Collections.sort(indexNames);
+            try (FileOutputStream out = new FileOutputStream(new File(subtitles, "index.txt"), false)) {
+                for (String item : indexNames) out.write((item + "\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            }
+            try (FileOutputStream out = new FileOutputStream(new File(content, "pack.txt"), false)) {
+                out.write(("name = Português brasileiro\n"
+                        + "author = lainTSX WebVTT contributors\n"
+                        + "; source: https://github.com/laingame-net/lainvtt/tree/main/pt-BR\n")
+                        .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            }
+
+            File destination = new File(langRoot, "pt-BR");
+            File backup = new File(langRoot, ".pt-BR-old");
+            deleteRecursively(backup);
+            boolean hadOld = destination.exists();
+            if (hadOld && !destination.renameTo(backup)) {
+                throw new IOException("Could not move the previous PT-BR subtitle pack");
+            }
+            if (!content.renameTo(destination)) {
+                if (hadOld) backup.renameTo(destination);
+                throw new IOException("Could not install the PT-BR subtitle pack");
+            }
+            deleteRecursively(backup);
+            deleteRecursively(staging);
+            staging = null;
+            final int installed = subtitleCount;
+            final String message = "Instaladas " + installed + " faixas de legendas PT-BR. No jogo, selecione Português brasileiro em F1 > Settings > Text / subtitles.";
+            runOnUiThread(() -> {
+                nativeOnSubtitlesDownloaded("pt-BR", installed, message);
+                Toast.makeText(this, "Legendas PT-BR instaladas (" + installed + " faixas).", Toast.LENGTH_LONG).show();
+            });
+        } catch (Exception error) {
+            final String message = "Falha ao baixar legendas PT-BR: " + error.getMessage();
+            runOnUiThread(() -> {
+                nativeOnSubtitlesDownloaded("pt-BR", 0, message);
                 Toast.makeText(this, message, Toast.LENGTH_LONG).show();
             });
         } finally {

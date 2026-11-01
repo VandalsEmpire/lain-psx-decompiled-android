@@ -1,12 +1,8 @@
 name: Android debug APK
 
 on:
-  push:
-    branches: [android-port]
-    paths:
-      - "android/**"
-      - "port/**"
-      - ".github/workflows/android.yml"
+  # Run once per PR update. The separate push trigger duplicated the Android
+  # build and produced confusing transient failures when SDL2 download timed out.
   pull_request:
     branches: [main]
   workflow_dispatch:

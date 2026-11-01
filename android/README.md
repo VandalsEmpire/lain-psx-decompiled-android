@@ -71,10 +71,9 @@ Keep the original mod folders elsewhere as backups. The imported copy is
 removed when the app is uninstalled. Consult [`../port/MODDING.md`](../port/MODDING.md)
 for the supported mod folder layout and file formats.
 
-Pause/resume validation, a Portuguese (Brazil) translation and widescreen
-rendering remain subsequent milestones. The original game display remains 4:3
-for now. The updated touch layout and subtitle download still need testing on
-a physical device before they can be considered validated.
+Pause/resume validation and widescreen rendering remain subsequent milestones.
+The game display remains 4:3 for now. The launcher interface is still in English;
+the PT-BR download below provides translated game subtitles, not a translated UI.
 
 ## Android touch layout and frame interpolation
 
@@ -94,6 +93,15 @@ The subtitle files are fetched from their authors and are not bundled in the
 APK. After installation, start the game and choose **English (laingame.net fan
 subtitles)** in **F1 → Settings → Text / subtitles**. Internet access is used
 only when the player starts this download.
+
+## Portuguese (Brazil) subtitles
+
+The same **Subtitles** tab offers a PT-BR download from the community
+[`lainvtt/pt-BR`](https://github.com/laingame-net/lainvtt/tree/main/pt-BR) set.
+The Android client downloads the VTT tracks, converts valid cues to the native
+SRT pack format, and installs them as `lang/pt-BR/`. After installation,
+select **Português brasileiro** in **F1 → Settings → Text / subtitles**.
+The translation files are fetched when requested and are not bundled in the APK.
 
 ## Unused-content gallery
 
