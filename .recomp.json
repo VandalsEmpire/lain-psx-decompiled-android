@@ -1,0 +1,42 @@
+{
+  "$schema": "https://recomp.fyi/schema/v1.json",
+  "game": "Serial Experiments Lain",
+  "system": "PS1",
+  "type": "port",
+  "original": {
+    "region": "Japan",
+    "serial": "SLPS-01603 / SLPS-01604"
+  },
+  "project": "re:Lain Android",
+  "status": "released",
+  "targets": ["Android"],
+  "approach": "Native C/C++ source port using SDL2, OpenGL ES 3.0 and a PsyCross-based PlayStation SDK layer.",
+  "toolchain": "PsyCross",
+  "maintainers": [
+    {
+      "name": "VandalsEmpire",
+      "link": "https://github.com/VandalsEmpire"
+    }
+  ],
+  "links": [
+    {
+      "label": "Android releases",
+      "url": "https://github.com/VandalsEmpire/lain-psx-decompiled-android/releases/latest"
+    },
+    {
+      "label": "Android documentation",
+      "url": "https://github.com/VandalsEmpire/lain-psx-decompiled-android/blob/main/android/README.md"
+    },
+    {
+      "label": "Upstream decompilation",
+      "url": "https://github.com/Y0oshi/lain-psx-decompiled"
+    }
+  ],
+  "tags": [
+    "Android",
+    "PS1",
+    "SDL2",
+    "PsyCross"
+  ],
+  "notes": "First public Android build of the native PS1 source port. Includes configurable touch controls, physical gamepad support, disc import, mod management, unused-content gallery, and optional English and Brazilian Portuguese subtitle downloads. Requires Android 6.0+, arm64-v8a and OpenGL ES 3.0. Landscape only; launcher UI is English. Game data is not distributed."
+}
