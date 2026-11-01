@@ -8,7 +8,7 @@ on:
       - "port/**"
       - ".github/workflows/android.yml"
   pull_request:
-    branches: [android-port]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -29,6 +29,8 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
 
       - name: Install Android toolchain
         run: |
