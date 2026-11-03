@@ -960,7 +960,18 @@ int main(int argc, char **argv) {
         SDL_Quit();
         return 1;
     }
-    /* The launcher's window is gone; PsyCross opens the game window. */
+#if defined(__ANDROID__)
+    if (g_lain_launcher_window) {
+        /* Hand the launcher's window and GL context to PsyX so the game
+         * reuses them. No SDL_Quit here: it would leave the Activity's
+         * SurfaceView empty long enough for Android to rotate the display
+         * to portrait for one frame (the "flash" on Play). */
+        PsyX_SetReusedGLContext(g_lain_launcher_window, g_lain_launcher_context);
+    } else {
+        SDL_Quit();
+    }
+#else
     SDL_Quit();
+#endif
     return boot_game(&settings, disc1, have2 ? disc2 : NULL);
 }

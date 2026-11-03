@@ -296,8 +296,27 @@ GrPBO		g_glOffscreenPBO;
 #endif
 
 #if defined(RENDERER_OGL) || defined(RENDERER_OGLES)
+#if defined(__ANDROID__)
+static SDL_Window *g_reused_window = NULL;
+static SDL_GLContext g_reused_context = NULL;
+
+/* Linkage inherited from PsyX_public.h (extern "C" block). */
+extern "C" void PsyX_SetReusedGLContext(SDL_Window *window, SDL_GLContext context) {
+    g_reused_window = window;
+    g_reused_context = context;
+}
+#endif
+
 int GR_InitialiseGLContext(char* windowName, int fullscreen)
 {
+#if defined(__ANDROID__)
+        if (g_reused_window) {
+                g_window = g_reused_window;
+                SDL_GL_MakeCurrent(g_window, g_reused_context);
+                return 1;
+        }
+#endif
+
 	int windowFlags = SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI; // lain: HiDPI
 
 #if defined(__ANDROID__)

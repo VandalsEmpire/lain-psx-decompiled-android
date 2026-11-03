@@ -1,0 +1,32 @@
+re:Lain Android cumulative update
+
+Apply this package at the ROOT of the existing repository, on branch
+android-port. Extract the ZIP and allow files to be overwritten. The archive
+contains the existing Android work accumulated so far plus the new Android
+Unused gallery; it is intended as one cumulative update, not a small patch.
+
+Included:
+- Android app, SAF import for original BIN/IMG disc data tracks, application
+  identity and Android launcher icon based on the project's save icon;
+- native Mods and English-subtitle launcher tabs;
+- PlayStation touch controls with individual placement for all four D-pad
+  directions, four face buttons, four shoulder buttons, Select and Start;
+- Android's disabled 60 fps interpolation;
+- the Lua Android smoke-test mod;
+- the Android Unused gallery, reusing the desktop unused_gallery.cpp decoder.
+
+The Unused gallery requires imported Disc 1. Disc 2 adds the Site B rare-content
+entry. First open decodes the user's imported disc images on a background thread.
+It displays unused/rare pictures and animations and can play the unused audio
+samples. The APK contains no game disc content.
+
+After applying, run:
+  git diff --check
+  "$HOME/.local/opt/gradle-9.6.0/bin/gradle" --no-daemon --console=plain -p android assembleDebug
+
+Install without uninstalling the existing app, preserving app-private discs,
+mods and settings:
+  adb install -r android/app/build/outputs/apk/debug/re-Lain-debug.apk
+
+The final Android Gradle build and on-device gallery check must be completed
+before publishing/merging the branch.

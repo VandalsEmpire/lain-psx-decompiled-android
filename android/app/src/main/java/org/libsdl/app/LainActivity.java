@@ -2,8 +2,11 @@ package org.libsdl.app;
 
 import android.app.Activity;
 import android.content.Intent;
+import android.content.pm.ActivityInfo;
+import android.content.res.Configuration;
 import android.database.Cursor;
 import android.net.Uri;
+import android.os.Bundle;
 import android.provider.OpenableColumns;
 import android.provider.DocumentsContract;
 import android.provider.DocumentsContract.Document;
@@ -497,6 +500,53 @@ public final class LainActivity extends SDLActivity {
 
         Toast.makeText(this, "Copying disc image into app storage...", Toast.LENGTH_SHORT).show();
         COPY_EXECUTOR.execute(() -> copyDiscIntoPrivateStorage(uri, displayName, targetDirectory));
+    }
+
+    // ---- Orientation enforcement (Sprint 1, item 1.1) ----------------------
+    // Belt-and-suspenders: the manifest already declares landscape, but on
+    // Android 12+ (especially multi-window, OEM skins and foldables) the
+    // system may ignore it, and SDL may race us in onCreate. Re-asserting
+    // after super.onCreate / onResume / onStart / focus changes keeps the
+    // whole app locked to landscape without depending on native hints.
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        enforceLandscape();
+    }
+
+    @Override
+    protected void onStart() {
+        super.onStart();
+        enforceLandscape();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        enforceLandscape();
+    }
+
+    @Override
+    public void onConfigurationChanged(Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        if (newConfig.orientation != Configuration.ORIENTATION_LANDSCAPE) {
+            enforceLandscape();
+        }
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) {
+            enforceLandscape();
+        }
+    }
+
+    private void enforceLandscape() {
+        if (getRequestedOrientation() != ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE) {
+            setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE);
+        }
     }
 
     private String queryDisplayName(Uri uri) {

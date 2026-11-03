@@ -1,3 +1,4 @@
+#include <SDL.h>
 #ifndef EMULATOR_PUBLIC_H
 #define EMULATOR_PUBLIC_H
 
@@ -126,4 +127,16 @@ extern void PsyX_SetSwapInterval(int interval);
 }
 #endif
 
+#endif
+#if defined(__ANDROID__)
+/* ANDROID_C_LINKAGE_APPLIED: declare with C linkage so main.c finds them. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+extern SDL_Window *g_lain_launcher_window;
+extern SDL_GLContext g_lain_launcher_context;
+extern void PsyX_SetReusedGLContext(SDL_Window *window, SDL_GLContext context);
+#ifdef __cplusplus
+} /* END_ANDROID_EXTERN_C */
+#endif
 #endif

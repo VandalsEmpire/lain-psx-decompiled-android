@@ -22,10 +22,11 @@
         android:hardwareAccelerated="true">
         <activity
             android:name="org.libsdl.app.LainActivity"
-            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|screenLayout|uiMode|navigation"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|screenLayout|uiMode|navigation|density"
             android:exported="true"
             android:launchMode="singleTask"
             android:screenOrientation="landscape"
+            android:resizeableActivity="false"
             android:alwaysRetainTaskState="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

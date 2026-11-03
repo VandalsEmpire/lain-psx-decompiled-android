@@ -23,6 +23,14 @@
 #include "imgui_impl_opengl3.h"
 #include "imgui_impl_sdl2.h"
 
+#if defined(__ANDROID__)
+/* Handed to PsyX (see PsyX_SetReusedGLContext) so the game reuses the
+#include "PsyX/PsyX_public.h"
+ * launcher's window+context instead of destroying and recreating them. */
+SDL_Window *g_lain_launcher_window = NULL;
+SDL_GLContext g_lain_launcher_context = NULL;
+#endif
+
 namespace {
 std::mutex g_picker_mutex;
 std::string g_picked_disc_path;
@@ -637,7 +645,16 @@ extern "C" int setup_ui_run(Settings *settings) {
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplSDL2_Shutdown();
     ImGui::DestroyContext();
-    SDL_GL_DeleteContext(context);
-    SDL_DestroyWindow(window);
+#if defined(__ANDROID__)
+    if (play) {
+        /* Give ownership to PsyX; do not destroy. */
+        g_lain_launcher_window = window;
+        g_lain_launcher_context = context;
+    } else
+#endif
+    {
+        SDL_GL_DeleteContext(context);
+        SDL_DestroyWindow(window);
+    }
     return play ? 1 : 0;
 }
