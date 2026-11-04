@@ -928,12 +928,8 @@ static int boot_game(const Settings *initial, const char *disc1, const char *dis
     modrt_quit();
     overlay_session_shutdown();
     hdtex_stop();
-    PsyX_ShutdownForLauncher(); /* stop vblank before releasing CD state */
-    LainCD_Shutdown();    modrt_quit();
-    overlay_session_shutdown();
-    hdtex_stop();
 
-    /* Stop audio when returning to launcher. */
+    /* Stop audio when returning to the launcher. */
     LainSpu_SetOutputGain(0.0f);
 
     PsyX_ShutdownForLauncher();
