@@ -18,14 +18,23 @@
 
 #include "discs.h"
 #include "mods_ui.h"
+#include "ui_locale.h"
 #include "unused_gallery.h"
 #include "imgui.h"
 #include "imgui_impl_opengl3.h"
 #include "imgui_impl_sdl2.h"
 
+#include "PsyX/PsyX_public.h"
+
+#if defined(__ANDROID__)
+#include <android/log.h>
+#define LAIN_DBG_UI(...) __android_log_print(ANDROID_LOG_INFO, "lain-dbg", __VA_ARGS__)
+#else
+#define LAIN_DBG_UI(...) do {} while (0)
+#endif
+
 #if defined(__ANDROID__)
 /* Handed to PsyX (see PsyX_SetReusedGLContext) so the game reuses the
-#include "PsyX/PsyX_public.h"
  * launcher's window+context instead of destroying and recreating them. */
 SDL_Window *g_lain_launcher_window = NULL;
 SDL_GLContext g_lain_launcher_context = NULL;
@@ -326,7 +335,7 @@ void gallery_draw_android(AndroidGallery &gallery) {
     }
     if (state == 3) {
         ImGui::TextWrapped("%s", gallery.error.c_str());
-        if (ImGui::Button("Try again / reload", ImVec2(-1, 54))) {
+        if (ImGui::Button(reLain_ui_text("Try again / reload", "Tentar novamente"), ImVec2(-1, 54))) {
             gallery.state.store(0);
         }
         return;
@@ -337,7 +346,7 @@ void gallery_draw_android(AndroidGallery &gallery) {
     ImGui::TextWrapped("Things found on the Serial Experiments Lain discs that the final game does not normally show. Everything below is decoded directly from your own disc images.");
     ImGui::Spacing();
     ImGui::BeginDisabled(gallery.state.load() == 1);
-    if (ImGui::Button("Reload gallery", ImVec2(-1, 48))) {
+    if (ImGui::Button(reLain_ui_text("Reload gallery", "Recarregar galeria"), ImVec2(-1, 48))) {
         gallery_release_gpu(gallery);
         gallery_sound_stop();
         gallery.sections.clear();
@@ -424,32 +433,75 @@ void gallery_draw_android(AndroidGallery &gallery) {
 } // namespace
 
 extern "C" int setup_ui_run(Settings *settings) {
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
-    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
-    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
-    SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
+    LAIN_DBG_UI("setup_ui_run: entry");
+SDL_Window *window = NULL;
+    SDL_GLContext context = NULL;
+#if defined(__ANDROID__)
+    /* Session loop (item 1.3): reuse launcher window (reuse launcher window)
+     * on the 2nd+ entry instead of creating a 2nd SurfaceView, which makes
+     * Android kill the Activity silently. */
+    LAIN_DBG_UI("setup_ui_run: reuse check launcher=%p ctx=%p",
+        (void*)g_lain_launcher_window, (void*)g_lain_launcher_context);
+    if (g_lain_launcher_window && g_lain_launcher_context) {
+        window = g_lain_launcher_window;
+        context = g_lain_launcher_context;
+        LAIN_DBG_UI("setup_ui_run: MakeCurrent (reuse) start");
+        SDL_GL_MakeCurrent(window, context);
+        LAIN_DBG_UI("setup_ui_run: MakeCurrent (reuse) OK");
+    } else
+#endif
+    {
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+        SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+        SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
+        SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
 
-    SDL_Window *window = SDL_CreateWindow(
-        "re:Lain", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
-        1280, 720, SDL_WINDOW_OPENGL | SDL_WINDOW_FULLSCREEN | SDL_WINDOW_ALLOW_HIGHDPI);
-    if (!window) {
-        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Android launcher window: %s", SDL_GetError());
-        return 0;
-    }
+        window = SDL_CreateWindow(
+            "re:Lain", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
+            1280, 720, SDL_WINDOW_OPENGL | SDL_WINDOW_FULLSCREEN | SDL_WINDOW_ALLOW_HIGHDPI);
+        if (!window) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Android launcher window: %s", SDL_GetError());
+            return 0;
+        }
 
-    SDL_GLContext context = SDL_GL_CreateContext(window);
-    if (!context) {
-        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Android GLES 3 context: %s", SDL_GetError());
-        SDL_DestroyWindow(window);
-        return 0;
+        context = SDL_GL_CreateContext(window);
+        if (!context) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Android GLES 3 context: %s", SDL_GetError());
+            SDL_DestroyWindow(window);
+            return 0;
+        }
+        SDL_GL_MakeCurrent(window, context);
     }
-    SDL_GL_MakeCurrent(window, context);
+    LAIN_DBG_UI("setup_ui_run: SetSwapInterval");
     SDL_GL_SetSwapInterval(1);
+    LAIN_DBG_UI("setup_ui_run: SetSwapInterval OK");
 
+    LAIN_DBG_UI("setup_ui_run: ImGui CreateContext start");
+#if defined(__ANDROID__)
+    /* The game runs its own ImGui (F1 overlay). longjmp skips its shutdown,
+     * so the global ImGui context still points at the game's backends.
+     * Destroy them before init, or ImGui_ImplSDL2_InitForOpenGL crashes
+     * on stale BackendPlatformUserData. Only runs on the 2nd+ entry. */
+    if (ImGui::GetCurrentContext() != nullptr) {
+        LAIN_DBG_UI("setup_ui_run: orphan ImGui detected, cleaning up");
+        ImGuiIO &orphan = ImGui::GetIO();
+        if (orphan.BackendRendererUserData) {
+            LAIN_DBG_UI("setup_ui_run:  ImGui_ImplOpenGL3_Shutdown");
+            ImGui_ImplOpenGL3_Shutdown();
+        }
+        if (orphan.BackendPlatformUserData) {
+            LAIN_DBG_UI("setup_ui_run:  ImGui_ImplSDL2_Shutdown");
+            ImGui_ImplSDL2_Shutdown();
+        }
+        ImGui::DestroyContext();
+        LAIN_DBG_UI("setup_ui_run: orphan ImGui cleaned");
+    }
+#endif
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
+    LAIN_DBG_UI("setup_ui_run: ImGui CreateContext OK");
     ImGuiIO &io = ImGui::GetIO();
     io.IniFilename = nullptr;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
@@ -463,9 +515,15 @@ extern "C" int setup_ui_run(Settings *settings) {
     }
     ImGui::GetStyle().ScaleAllSizes(ui_scale);
     ImGui::GetStyle().FontScaleMain = ui_scale;
+    LAIN_DBG_UI("setup_ui_run: ImGui_ImplSDL2_InitForOpenGL start");
     ImGui_ImplSDL2_InitForOpenGL(window, context);
+    LAIN_DBG_UI("setup_ui_run: ImGui_ImplSDL2_InitForOpenGL OK");
+    LAIN_DBG_UI("setup_ui_run: ImGui_ImplOpenGL3_Init start");
     ImGui_ImplOpenGL3_Init("#version 300 es");
+    LAIN_DBG_UI("setup_ui_run: ImGui_ImplOpenGL3_Init OK");
+    LAIN_DBG_UI("setup_ui_run: AddFontDefault start");
     io.Fonts->AddFontDefault();
+    LAIN_DBG_UI("setup_ui_run: AddFontDefault OK");
 
     static ImportJob job = {};
     bool running = true;
@@ -532,17 +590,17 @@ extern "C" int setup_ui_run(Settings *settings) {
         ImGui::BeginChild("launcher_tab_viewport", ImVec2(0, -76.0f * ui_scale), false,
                           ImGuiWindowFlags_AlwaysVerticalScrollbar);
         if (ImGui::BeginTabBar("launcher_tabs")) {
-            if (ImGui::BeginTabItem("Discs")) {
-                ImGui::SeparatorText("Game discs");
+            if (ImGui::BeginTabItem(reLain_ui_text("Discs", "Discos"))) {
+                ImGui::SeparatorText(reLain_ui_text("Game discs", "Discos do jogo"));
                 ImGui::Text("Disc 1 (Site A): %s", have_disc1 ? "installed" : "not installed");
                 ImGui::Text("Disc 2 (Site B): %s", have_disc2 ? "installed" : "not installed");
-                ImGui::TextWrapped("Choose the raw .bin or .img data track (2352 bytes per sector).");
-                ImGui::TextWrapped("The game identifies automatically whether it is Disc 1 or Disc 2.");
+                ImGui::TextWrapped("%s", reLain_ui_text("Choose the raw .bin or .img data track (2352 bytes per sector).", "Escolha a trilha de dados .bin ou .img (2352 bytes por setor)."));
+                ImGui::TextWrapped("%s", reLain_ui_text("The game identifies automatically whether it is Disc 1 or Disc 2.", "O jogo identifica automaticamente qual disco foi importado."));
                 ImGui::TextWrapped("Imported discs are stored in this app's private folder.");
                 ImGui::Spacing();
 
                 ImGui::BeginDisabled(busy || picker_waiting);
-                if (ImGui::Button("Add / replace disc image", ImVec2(300.0f * ui_scale, 58.0f * ui_scale))) {
+                if (ImGui::Button(reLain_ui_text("Add / replace disc image", "Importar/substituir disco"), ImVec2(300.0f * ui_scale, 58.0f * ui_scale))) {
                     if (request_android_disc_picker(settings_data_dir())) {
                         picker_waiting = true;
                         last_message = "Choose a BIN or IMG data track...";
@@ -553,7 +611,7 @@ extern "C" int setup_ui_run(Settings *settings) {
                 ImGui::EndDisabled();
 
                 if (picker_waiting) {
-                    ImGui::TextDisabled("Waiting for file selection or copy...");
+                    ImGui::TextDisabled("%s", reLain_ui_text("Waiting for file selection or copy...", "Aguardando selecao ou copia do arquivo..."));
                 }
                 if (busy) {
                     ImGui::ProgressBar(job.progress, ImVec2(-1, 0), "Importing and identifying...");
@@ -564,13 +622,13 @@ extern "C" int setup_ui_run(Settings *settings) {
                 }
                 ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem("Mods")) {
+            if (ImGui::BeginTabItem(reLain_ui_text("Mods", "Mods"))) {
                 ImGui::BeginChild("android_mods_page", ImVec2(0, 0), false);
                 mods_tab_draw(settings);
                 ImGui::EndChild();
                 ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem("Subtitles")) {
+            if (ImGui::BeginTabItem(reLain_ui_text("Subtitles", "Legendas"))) {
                 ImGui::SeparatorText("Português brasileiro");
                 ImGui::TextWrapped("Baixe as legendas comunitárias PT-BR do projeto lainTSX. Os arquivos WebVTT são convertidos para SRT e instalados no pacote de idioma do re:Lain.");
                 ImGui::BeginDisabled(subtitles_waiting);
@@ -584,11 +642,11 @@ extern "C" int setup_ui_run(Settings *settings) {
                 }
                 ImGui::EndDisabled();
                 ImGui::Spacing();
-                ImGui::SeparatorText("English fan subtitles");
+                ImGui::SeparatorText(reLain_ui_text("English fan subtitles", "Legendas de fas em ingles"));
                 ImGui::TextWrapped("Download the completed timed English subtitle set from laingame.net's public source repository.");
-                ImGui::TextDisabled("Subtitle packs are optional and are not bundled with re:Lain.");
+                ImGui::TextDisabled("%s", reLain_ui_text("Subtitle packs are optional and are not bundled with re:Lain.", "Os pacotes de legendas sao opcionais e nao acompanham o APK."));
                 ImGui::BeginDisabled(subtitles_waiting);
-                if (ImGui::Button("Download English subtitles", ImVec2(320.0f * ui_scale, 58.0f * ui_scale))) {
+                if (ImGui::Button(reLain_ui_text("Download English subtitles", "Baixar legendas em ingles"), ImVec2(320.0f * ui_scale, 58.0f * ui_scale))) {
                     if (request_android_subtitles(settings_data_dir(), "downloadEnglishSubtitles")) {
                         subtitles_waiting = true;
                         subtitle_message = "Connecting to GitHub and installing the subtitle files...";
@@ -606,7 +664,7 @@ extern "C" int setup_ui_run(Settings *settings) {
                 ImGui::TextWrapped("After starting the game, open F1 > Settings > Text / subtitles and select Português brasileiro or English (laingame.net fan subtitles). The original Japanese is always available.");
                 ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem("Unused")) {
+            if (ImGui::BeginTabItem(reLain_ui_text("Unused", "Extras"))) {
                 ImGui::BeginChild("android_unused_page", ImVec2(0, 0), false);
                 gallery_draw_android(g_gallery);
                 ImGui::EndChild();
@@ -618,14 +676,14 @@ extern "C" int setup_ui_run(Settings *settings) {
 
         ImGui::Separator();
         const float footer_button_width = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
-        ImGui::BeginDisabled(!have_disc1 || busy || picker_waiting);
-        if (ImGui::Button("Play", ImVec2(footer_button_width, 58.0f * ui_scale))) {
+        ImGui::BeginDisabled(!have_disc1 || busy || picker_waiting || mods_android_import_busy());
+        if (ImGui::Button(reLain_ui_text("Play", "Jogar"), ImVec2(footer_button_width, 58.0f * ui_scale))) {
             settings_save(settings);
             play = true;
         }
         ImGui::EndDisabled();
         ImGui::SameLine();
-        if (ImGui::Button("Exit", ImVec2(footer_button_width, 58.0f * ui_scale))) {
+        if (ImGui::Button(reLain_ui_text("Exit", "Sair"), ImVec2(footer_button_width, 58.0f * ui_scale))) {
             running = false;
         }
         ImGui::End();
@@ -647,14 +705,19 @@ extern "C" int setup_ui_run(Settings *settings) {
     ImGui::DestroyContext();
 #if defined(__ANDROID__)
     if (play) {
-        /* Give ownership to PsyX; do not destroy. */
+        /* Give ownership to PsyX; do not destroy (reused next launcher). */
         g_lain_launcher_window = window;
         g_lain_launcher_context = context;
-    } else
-#endif
-    {
+    } else {
+        /* Exit: destroy and clear so the next cold start is fresh. */
         SDL_GL_DeleteContext(context);
         SDL_DestroyWindow(window);
+        g_lain_launcher_window = NULL;
+        g_lain_launcher_context = NULL;
     }
+#else
+    SDL_GL_DeleteContext(context);
+    SDL_DestroyWindow(window);
+#endif
     return play ? 1 : 0;
 }

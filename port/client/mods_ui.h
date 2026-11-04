@@ -8,4 +8,6 @@ void mods_tab_draw(Settings *s);
 #if defined(__ANDROID__)
 /* Receives the asynchronous result of the Android Storage Access Framework importer. */
 extern "C" void mods_android_import_result(const char *folder_path, const char *message);
+/* True while the Android picker or background importer is active. */
+extern "C" bool mods_android_import_busy(void);
 #endif

@@ -136,6 +136,13 @@ extern "C" {
 extern SDL_Window *g_lain_launcher_window;
 extern SDL_GLContext g_lain_launcher_context;
 extern void PsyX_SetReusedGLContext(SDL_Window *window, SDL_GLContext context);
+extern void PsyX_ShutdownForLauncher(void);
+/* Session loop (item 1.3): PsyX_Exit() longjmps back to boot_game() so
+ * quitting the game returns to the launcher instead of killing the app. */
+#include <setjmp.h>
+extern jmp_buf g_lain_quit_jmp;
+extern volatile int g_lain_quit_jmp_armed;
+extern volatile int g_lain_quit_requested;
 #ifdef __cplusplus
 } /* END_ANDROID_EXTERN_C */
 #endif

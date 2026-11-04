@@ -55,14 +55,32 @@ the touch controls.
 
 ## Mods
 
-The launcher has a **Mods** tab. Choose **Import mod folder** and select the
-folder of one mod (the folder containing its files). `mod.ini` is optional;
-when absent, the folder name is used. Extract `.zip` archives in the file
-manager before importing. The app copies the folder into its private `mods/`
-directory and does not modify the selected source folder.
-Imported mods are enabled by default. The tab lets you refresh the list,
-enable/disable mods, inspect validation results, and change load order before
-pressing **Play**. The existing mod runtime also applies data mods, Lua scripts,
+The launcher has a **Mods** tab. Choose **Import folder** for one existing
+folder (the one containing the mod's files), or **Import ZIP(s)** to select up to
+16 ZIP archives in one operation. ZIPs may contain one mod, a root mod folder,
+or a bundle of several mod folders. `mod.ini` is optional; when absent, the
+folder name is used. There is no need to extract ZIPs in a file manager.
+
+The app first copies or extracts mods into hidden temporary folders in its
+private storage, validates paths and limits (20,000 entries / 512 MiB
+uncompressed per ZIP), and only then activates the imported mod. Play and
+removal are disabled while import is in progress. Imported files do not modify
+the original folder or ZIP.
+
+If the mod folder name already exists, choose **Replace**, **Skip** or
+**Cancel**. No automatic "(2)" duplicate is created. Replacements preserve a
+temporary backup until the new folder is committed. Interrupted imports and
+backups are recovered on the next import attempt.
+
+The tab lets you refresh, enable/disable, change load order, inspect asset
+and Lua syntax diagnostics, and **Remove mod** with confirmation. Removal
+deletes only the copy in the app's private `mods/` directory, not the source
+folder. All existing mod folders remain compatible.
+
+The Android importer warns before activating mods containing executable Lua
+scripts or native plugins, and rejects `.so` plugins that are not ARM64 ELF.
+A valid ARM64 ELF may still be incompatible with Android's libraries or API
+level; only install code from sources you trust. The existing mod runtime also applies data mods, Lua scripts,
 HD texture packs, and native plugins when the project supports their target
 platform. A mod's native plugin must be compiled for Android/arm64 to load on
 this APK; Windows `.dll` or macOS `.dylib` files will not work on Android.

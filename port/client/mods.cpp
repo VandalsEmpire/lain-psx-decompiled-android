@@ -24,6 +24,10 @@
 #include "settings.h"
 #include "tim.h"
 #include "tracks.h"
+extern "C" {
+#include "lua.h"
+#include "lauxlib.h"
+}
 
 extern "C" int PsyX_CD_GetImageInfo(const char **fileName, const unsigned char **mem, int *memSize, int *sectorSize);
 
@@ -820,8 +824,9 @@ std::vector<ModInfo> mods_scan(const char *setting) {
         pos = bar == std::string::npos ? s.size() : bar + 1;
         if (tok.size() > 1 && (tok[0] == '+' || tok[0] == '-')) order.push_back({tok.substr(1), tok[0] == '+'});
     }
+    std::set<std::string> seen;
     for (auto &o : order) {
-        if (std::find(folders.begin(), folders.end(), o.first) != folders.end()) {
+        if (seen.insert(o.first).second && std::find(folders.begin(), folders.end(), o.first) != folders.end()) {
             ModInfo m = read_mod(fs::u8path(mods_dir()) / fs::u8path(o.first));
             m.enabled = o.second;
             out.push_back(m);
@@ -890,11 +895,37 @@ void mods_validate(std::vector<ModInfo> &mods, const char *disc1, const char *di
         }
     }
     for (ModInfo &m : mods) {
+        m.script_errors.clear();
+        if (!m.scripts.empty()) {
+            lua_State *L = luaL_newstate();
+            if (!L) {
+                m.script_errors.push_back("Lua: sem memoria para validar scripts");
+            } else {
+                for (const std::string &script : m.scripts) {
+                    const fs::path file = fs::u8path(mods_dir()) / fs::u8path(m.folder) / fs::u8path(script);
+                    std::error_code ec;
+                    const uintmax_t bytes = fs::file_size(file, ec);
+                    if (ec) {
+                        m.script_errors.push_back(script + ": nao foi possivel ler");
+                    } else if (bytes > 4u * 1024u * 1024u) {
+                        m.script_errors.push_back(script + ": arquivo Lua excede 4 MiB");
+                    } else if (luaL_loadfile(L, file.u8string().c_str()) != LUA_OK) {
+                        const char *why = lua_tostring(L, -1);
+                        m.script_errors.push_back(script + ": " + (why ? why : "erro de sintaxe"));
+                        lua_pop(L, 1);
+                    } else {
+                        lua_pop(L, 1); /* discard compiled chunk; never execute it */
+                    }
+                }
+                lua_close(L);
+            }
+        }
         m.errors = m.warnings = 0;
         for (const ModFile &f : m.files) {
             m.errors += f.level == 2;
             m.warnings += f.level == 1;
         }
+        m.errors += (int)m.script_errors.size();
     }
 }
 
@@ -936,6 +967,43 @@ bool mods_create(const std::string &name, std::string &folder, std::string &err)
         return false;
     }
     folder = f;
+    return true;
+}
+
+bool mods_remove(const std::string &folder, std::string &err) {
+    if (folder.empty() || folder == "." || folder == ".." || folder[0] == '.' ||
+        folder[0] == '_' || folder.find_first_of("/\\|") != std::string::npos) {
+        err = "invalid or reserved mod folder";
+        return false;
+    }
+    for (unsigned char c : folder) {
+        if (c < 0x20 || c == 0x7f) {
+            err = "invalid mod folder name";
+            return false;
+        }
+    }
+    std::error_code ec;
+    const fs::path root = fs::canonical(fs::u8path(mods_dir()), ec);
+    if (ec) {
+        err = "could not open mods directory";
+        return false;
+    }
+    const fs::path target = root / fs::u8path(folder);
+    const fs::file_status stat = fs::symlink_status(target, ec);
+    if (ec || !fs::is_directory(stat) || fs::is_symlink(stat)) {
+        err = "the selected mod folder does not exist or is a symlink";
+        return false;
+    }
+    const fs::path canonical = fs::canonical(target, ec);
+    if (ec || canonical.parent_path() != root) {
+        err = "the mod directory is outside the app's mods directory";
+        return false;
+    }
+    fs::remove_all(target, ec);
+    if (ec) {
+        err = "could not delete the mod: " + ec.message();
+        return false;
+    }
     return true;
 }
 

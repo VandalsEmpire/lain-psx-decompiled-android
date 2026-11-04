@@ -31,6 +31,9 @@ enum {
 };
 typedef void (*OverlayApplyFn)(int what);
 void overlay_menu_init(Settings *settings, OverlayApplyFn apply);
+/* Release the game ImGui context/backends on Return to launcher.
+ * Required before starting a second game session on the same SDL window. */
+void overlay_session_shutdown(void);
 int overlay_menu_is_open(void);
 
 /* Gives the overlay an SDL event first (install as g_lain_onEvent). Returns 1

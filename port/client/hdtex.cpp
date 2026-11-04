@@ -94,6 +94,8 @@ unsigned int provide(const LainHDKey *k) {
 } // namespace
 
 extern "C" void hdtex_start(const char *mods_setting, int dump) {
+    g_files.clear();
+    LainHD_SetProvider(nullptr);
     std::error_code ec;
     for (const ModInfo &m : mods_scan(mods_setting)) {
         if (!m.enabled) continue;
@@ -120,4 +122,11 @@ extern "C" void hdtex_start(const char *mods_setting, int dump) {
         LainHD_SetProvider(provide);
         if (!g_files.empty()) printf("[mods] %zu HD textures available\n", g_files.size());
     }
+}
+
+extern "C" void hdtex_stop(void) {
+    LainHD_SetProvider(nullptr);
+    g_files.clear();
+    g_dump = false;
+    g_dump_dir.clear();
 }
