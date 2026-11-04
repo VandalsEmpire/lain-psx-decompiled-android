@@ -485,20 +485,27 @@ static bool overlay_init(void) {
 
 /* The subtitle font can change while playing (a pack chosen in the menu); ImGui
  * 1.92's dynamic atlas accepts new fonts at any time. */
+
 static void load_sub_font(void) {
-    /* Each font file is added to the atlas once, however often packs are switched. */
+    /* Each font file is added to the atlas once. */
     s_font_dirty = false;
     s_sub_font = nullptr;
+
     if (!s_font_path[0]) {
         return;
     }
+
     for (auto &f : s_loaded_fonts) {
         if (f.first == s_font_path) {
             s_sub_font = f.second;
             return;
         }
     }
-    s_sub_font = ImGui::GetIO().Fonts->AddFontFromFileTTF(s_font_path, SUB_FONT_PX);
+
+    s_sub_font = ImGui::GetIO().Fonts->AddFontFromFileTTF(
+        s_font_path, SUB_FONT_PX
+    );
+
     if (s_sub_font) {
         s_loaded_fonts.emplace_back(s_font_path, s_sub_font);
     }
