@@ -6,6 +6,8 @@
 #include <string.h>
 
 #include <atomic>
+#include <fstream>
+#include <iterator>
 #include <memory>
 #include <string>
 #include <thread>
@@ -21,6 +23,7 @@
 #include "discs.h"
 #include "imgui.h"
 #include "mods.h"
+#include "ui_locale.h"
 
 namespace {
 
@@ -47,6 +50,9 @@ struct Tab {
     int selected = 0;
     char new_name[64] = "";
     bool naming = false;
+    std::string remove_folder;
+    std::string remove_name;
+    std::string last_errors;
     std::string message;
 };
 
@@ -57,6 +63,58 @@ std::mutex g_android_import_mutex;
 std::string g_android_import_path;
 std::string g_android_import_message;
 bool g_android_import_ready = false;
+
+bool android_activity_busy(void) {
+    JNIEnv *env = static_cast<JNIEnv *>(SDL_AndroidGetJNIEnv());
+    jobject activity = static_cast<jobject>(SDL_AndroidGetActivity());
+    if (!env || !activity) return false;
+    jclass cls = env->GetObjectClass(activity);
+    jmethodID method = cls ? env->GetMethodID(cls, "isModImportBusy", "()Z") : nullptr;
+    bool busy = method ? env->CallBooleanMethod(activity, method) == JNI_TRUE : false;
+    if (env->ExceptionCheck()) { env->ExceptionClear(); busy = true; }
+    if (cls) env->DeleteLocalRef(cls);
+    env->DeleteLocalRef(activity);
+    return busy;
+}
+
+std::string android_activity_status(void) {
+    JNIEnv *env = static_cast<JNIEnv *>(SDL_AndroidGetJNIEnv());
+    jobject activity = static_cast<jobject>(SDL_AndroidGetActivity());
+    if (!env || !activity) return "";
+    jclass cls = env->GetObjectClass(activity);
+    jmethodID method = cls ? env->GetMethodID(cls, "getModImportStatus", "()Ljava/lang/String;") : nullptr;
+    std::string status;
+    if (method) {
+        jstring value = static_cast<jstring>(env->CallObjectMethod(activity, method));
+        if (!env->ExceptionCheck() && value) {
+            const char *chars = env->GetStringUTFChars(value, nullptr);
+            if (chars) { status = chars; env->ReleaseStringUTFChars(value, chars); }
+        }
+        if (value) env->DeleteLocalRef(value);
+    }
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    if (cls) env->DeleteLocalRef(cls);
+    env->DeleteLocalRef(activity);
+    return status;
+}
+
+bool request_android_mod_zip_picker(void) {
+    JNIEnv *env = static_cast<JNIEnv *>(SDL_AndroidGetJNIEnv());
+    jobject activity = static_cast<jobject>(SDL_AndroidGetActivity());
+    if (!env || !activity) return false;
+    jclass cls = env->GetObjectClass(activity);
+    jmethodID method = cls ? env->GetMethodID(cls, "openModZipPicker", "(Ljava/lang/String;)V") : nullptr;
+    jstring directory = method ? env->NewStringUTF(mods_dir().c_str()) : nullptr;
+    bool ok = method && directory;
+    if (ok) {
+        env->CallVoidMethod(activity, method, directory);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); ok = false; }
+    } else if (env->ExceptionCheck()) env->ExceptionClear();
+    if (directory) env->DeleteLocalRef(directory);
+    if (cls) env->DeleteLocalRef(cls);
+    env->DeleteLocalRef(activity);
+    return ok;
+}
 
 bool request_android_mod_folder_picker(void) {
     JNIEnv *env = static_cast<JNIEnv *>(SDL_AndroidGetJNIEnv());
@@ -92,6 +150,11 @@ bool disc_paths(std::string &d1, std::string &d2) {
 /* Rescans the folder and starts checking in the background. */
 void refresh(Settings *s) {
     g_tab.mods = mods_scan(s->mods);
+    {
+        std::ifstream file(std::string(settings_data_dir()) + "last_mod_errors.txt");
+        g_tab.last_errors.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+        if (g_tab.last_errors.size() > 8192) g_tab.last_errors.resize(8192);
+    }
     g_tab.loaded = true;
     g_tab.checked = false;
     if (g_tab.selected >= (int)g_tab.mods.size()) g_tab.selected = (int)g_tab.mods.size() - 1;
@@ -187,6 +250,9 @@ void draw_details(const ModInfo &m) {
         else if (!m.scripts.empty()) ImGui::BulletText("Lua files without a main.lua (not run)");
         for (const std::string &p : m.plugins) ImGui::BulletText("Plugin: %s", p.c_str());
         ImGui::TextDisabled("Script and plugin messages appear in the F1 menu's Mods tab.");
+        for (const std::string &error : m.script_errors)
+            ImGui::TextColored(level_color(2), "Lua: %s", error.c_str());
+        ImGui::TextColored(level_color(1), "Aviso: scripts Lua e plugins .so executam codigo. Instale apenas mods confiaveis.");
     }
     if (!m.ignored.empty()) {
         ImGui::Spacing();
@@ -205,6 +271,14 @@ extern "C" void mods_android_import_result(const char *folder_path, const char *
     g_android_import_ready = true;
 }
 #endif
+
+extern "C" bool mods_android_import_busy(void) {
+#if defined(__ANDROID__)
+    return android_activity_busy();
+#else
+    return false;
+#endif
+}
 
 void mods_tab_draw(Settings *s) {
     Tab &t = g_tab;
@@ -255,7 +329,9 @@ void mods_tab_draw(Settings *s) {
                        "They are applied when you press Play; your discs are never changed.");
 #if defined(__ANDROID__)
     const float ui_scale = ImGui::GetFontSize() / 13.0f;
-    if (ImGui::Button("Import mod folder", ImVec2(205.0f * ui_scale, 46.0f * ui_scale))) {
+    const bool importing = mods_android_import_busy();
+    ImGui::BeginDisabled(importing);
+    if (ImGui::Button(reLain_ui_text("Import folder", "Importar pasta"), ImVec2(172.0f * ui_scale, 46.0f * ui_scale))) {
         if (request_android_mod_folder_picker()) {
             t.message = "Choose the mod's folder (the one containing its files)...";
         } else {
@@ -263,8 +339,19 @@ void mods_tab_draw(Settings *s) {
         }
     }
     ImGui::SameLine();
-    if (ImGui::Button("Refresh", ImVec2(118.0f * ui_scale, 46.0f * ui_scale))) refresh(s);
-    ImGui::TextDisabled("Select one mod folder. mod.ini is optional; ZIPs must be extracted first.");
+    if (ImGui::Button(reLain_ui_text("Import ZIP(s)", "Importar ZIP(s)"), ImVec2(172.0f * ui_scale, 46.0f * ui_scale))) {
+        if (request_android_mod_zip_picker()) t.message = "Selecione um ou mais ZIPs de mods...";
+        else t.message = "Nao foi possivel abrir o seletor de ZIPs.";
+    }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (ImGui::Button(reLain_ui_text("Refresh", "Atualizar"), ImVec2(107.0f * ui_scale, 46.0f * ui_scale))) refresh(s);
+    if (importing) {
+        const std::string status = android_activity_status();
+        ImGui::TextDisabled("Importacao em andamento: %s", status.c_str());
+        ImGui::TextDisabled("%s", reLain_ui_text("Play and removal are temporarily disabled.", "Jogar e remover estao bloqueados durante a importacao."));
+    }
+    ImGui::TextDisabled("%s", reLain_ui_text("Single ZIP, mod bundle or multiple ZIPs; source folders stay untouched.", "ZIP individual ou pacote com varios mods; pastas originais preservadas."));
 #else
     if (ImGui::Button("Open mods folder")) open_folder(mods_dir());
     ImGui::SameLine();
@@ -351,6 +438,10 @@ void mods_tab_draw(Settings *s) {
         ImGui::SetTooltip("Every picture the game draws is saved to the texture_dump folder, named for a\n"
                           "texture pack: upscale one, keep its name, put it in a mod's textures folder.");
     }
+    if (!t.last_errors.empty() &&
+        ImGui::CollapsingHeader(reLain_ui_text("Last session mod errors", "Erros de mods da ultima sessao"))) {
+        ImGui::TextWrapped("%s", t.last_errors.c_str());
+    }
     ImGui::Separator();
 
     if (t.mods.empty()) {
@@ -419,8 +510,72 @@ void mods_tab_draw(Settings *s) {
 #if !defined(__ANDROID__)
         if (ImGui::Button("Open folder")) open_folder(mods_dir() + "/" + t.mods[t.selected].folder);
 #endif
+        ImGui::BeginDisabled(mods_android_import_busy());
+        if (ImGui::Button(reLain_ui_text("Remove mod", "Remover mod"), ImVec2(-1, 0))) {
+            t.remove_folder = t.mods[t.selected].folder;
+            t.remove_name = t.mods[t.selected].name;
+            ImGui::OpenPopup(reLain_ui_text("Remove mod?", "Remover mod?"));
+        }
+        ImGui::EndDisabled();
+        if (ImGui::BeginPopupModal(reLain_ui_text("Remove mod?", "Remover mod?"), nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::TextWrapped(reLain_ui_text("Delete \"%s\" from re:Lain?", "Excluir \"%s\" do re:Lain?"), t.remove_name.c_str());
+            ImGui::TextWrapped("%s", reLain_ui_text("This removes only the imported copy. The original folder is untouched.", "Isso apaga somente a copia interna. A pasta original nao sera apagada."));
+            ImGui::Spacing();
+            ImGui::BeginDisabled(mods_android_import_busy());
+            if (ImGui::Button(reLain_ui_text("Delete permanently", "Excluir permanentemente"), ImVec2(200, 0))) {
+                std::string error;
+                const std::string folder = t.remove_folder, name = t.remove_name;
+                if (mods_remove(folder, error)) {
+                    for (size_t n = 0; n < t.mods.size(); ++n) {
+                        if (t.mods[n].folder == folder) {
+                            t.mods.erase(t.mods.begin() + n);
+                            t.selected = std::max(0, std::min(t.selected, (int)t.mods.size() - 1));
+                            break;
+                        }
+                    }
+                    save_order(s);
+                    t.message = "Mod removido: " + name;
+                } else {
+                    t.message = "Falha ao remover: " + error;
+                }
+                t.remove_folder.clear();
+                t.remove_name.clear();
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            if (ImGui::Button(reLain_ui_text("Cancel", "Cancelar"), ImVec2(110, 0))) {
+                t.remove_folder.clear();
+                t.remove_name.clear();
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
         ImGui::Separator();
         if (t.selected < (int)t.mods.size()) draw_details(t.mods[t.selected]);
     }
     ImGui::EndChild();
+}
+
+/* The tab is the source of truth after any enable/remove/import action.
+ * Before first opening the tab, scan once (not once per rendered frame).
+ * No background filesystem access, no mutating Settings and no fake "loaded" count. */
+ModsUiCounts mods_ui_counts(const Settings *s) {
+    ModsUiCounts counts;
+    if (!s) return counts;
+    static bool initial_scanned = false;
+    static std::vector<ModInfo> initial_mods;
+    const std::vector<ModInfo> *list = nullptr;
+    if (g_tab.loaded) {
+        list = &g_tab.mods;
+    } else {
+        if (!initial_scanned) {
+            initial_mods = mods_scan(s->mods);
+            initial_scanned = true;
+        }
+        list = &initial_mods;
+    }
+    counts.installed = (int)list->size();
+    for (const ModInfo &mod : *list) if (mod.enabled) ++counts.enabled;
+    return counts;
 }

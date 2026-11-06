@@ -1,6 +1,8 @@
 package org.libsdl.app;
 
 import android.app.Activity;
+import android.app.AlertDialog;
+import android.content.ClipData;
 import android.content.Intent;
 import android.content.pm.ActivityInfo;
 import android.content.res.Configuration;
@@ -17,9 +19,21 @@ import java.io.BufferedInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.BufferedOutputStream;
 import java.io.File;
+import java.io.FileInputStream;
+import java.io.OutputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.Arrays;
+import java.util.Comparator;
+import java.util.zip.ZipOutputStream;
+import java.util.zip.Deflater;
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.Locale;
@@ -32,14 +46,192 @@ import java.util.zip.ZipInputStream;
 public final class LainActivity extends SDLActivity {
     private static final int REQUEST_DISC_IMAGE = 0x4c41;
     private static final int REQUEST_MOD_FOLDER = 0x4c42;
+    private static final int REQUEST_MOD_ZIPS = 0x4c43;
+    private static final int REQUEST_ASSET_PNG = 0x4c44;
+    private static final int REQUEST_ASSET_ZIP = 0x4c45;
     private static final ExecutorService COPY_EXECUTOR = Executors.newSingleThreadExecutor();
 
     private String pendingDirectory;
-    private String pendingModsDirectory;
+    private volatile String pendingModsDirectory;
+    private volatile String pendingModZipsDirectory;
+    private volatile boolean modImportBusy;
+    private volatile String modImportStatus = "";
+    private volatile boolean modCodeWarningAccepted;
+    private File pendingAssetPng;
+    private File pendingAssetZip; // re:Lain Archive batch export v0.1.4
 
     private static native void nativeOnDiscPicked(String absolutePath);
     private static native void nativeOnModFolderImported(String absolutePath, String message);
     private static native void nativeOnSubtitlesDownloaded(String code, int subtitleCount, String message);
+    private static native void nativeOnAssetExportFinished(String message);
+
+    /** Export one gallery image through Android's document picker; no storage permission. */
+    public void exportGalleryPng(String stagedPath, String suggestedName) {
+        runOnUiThread(() -> {
+            if (pendingAssetPng != null) {
+                nativeOnAssetExportFinished("Another export is already open.");
+                return;
+            }
+            File staged = new File(stagedPath == null ? "" : stagedPath);
+            try {
+                File real = staged.getCanonicalFile();
+                File internal = getFilesDir().getCanonicalFile();
+                File external = getExternalFilesDir(null);
+                boolean allowed = real.getPath().startsWith(internal.getPath() + File.separator);
+                if (external != null) {
+                    String prefix = external.getCanonicalPath() + File.separator;
+                    allowed |= real.getPath().startsWith(prefix);
+                }
+                // Only the app's temporary gallery export may be opened here.
+                if (!allowed || !real.getName().equals(".wired-gallery-export.png") ||
+                    !real.isFile() || real.length() == 0 || real.length() > 64L * 1024 * 1024) {
+                    throw new IOException("Invalid temporary gallery file");
+                }
+                pendingAssetPng = real;
+                String cleanName = suggestedName == null ? "lain-gallery.png" : suggestedName;
+                if (!cleanName.matches("[a-zA-Z0-9_-]{1,64}\\.png")) cleanName = "lain-gallery.png";
+                Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+                intent.addCategory(Intent.CATEGORY_OPENABLE);
+                intent.setType("image/png");
+                intent.putExtra(Intent.EXTRA_TITLE, cleanName);
+                intent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+                startActivityForResult(intent, REQUEST_ASSET_PNG);
+            } catch (Exception error) {
+                pendingAssetPng = null;
+                nativeOnAssetExportFinished("Could not open the export picker: " + error.getMessage());
+            }
+        });
+    }
+
+    private void saveGalleryPngToUri(File staged, Uri destination) {
+        String result;
+        try (InputStream input = new BufferedInputStream(new FileInputStream(staged));
+             OutputStream output = getContentResolver().openOutputStream(destination, "w")) {
+            if (output == null) throw new IOException("The document provider returned no output stream");
+            byte[] buffer = new byte[64 * 1024];
+            long copied = 0;
+            for (int n; (n = input.read(buffer)) != -1;) {
+                copied += n;
+                if (copied > 64L * 1024 * 1024) throw new IOException("Export exceeds 64 MiB");
+                output.write(buffer, 0, n);
+            }
+            output.flush();
+            result = "PNG exported successfully (" + copied + " bytes).";
+        } catch (Exception error) {
+            result = "PNG export failed: " + error.getMessage();
+        } finally {
+            if (staged != null) staged.delete();
+        }
+        final String notice = result;
+        runOnUiThread(() -> {
+            Toast.makeText(this, notice, Toast.LENGTH_LONG).show();
+            nativeOnAssetExportFinished(notice);
+        });
+    }
+
+
+    /** Export all locally decoded gallery PNGs to one ZIP through Android SAF. */
+    public void exportGalleryZip(String stagedDirectory) {
+        runOnUiThread(() -> {
+            if (pendingAssetPng != null || pendingAssetZip != null) {
+                nativeOnAssetExportFinished("Another export is already open.");
+                return;
+            }
+            try {
+                File dir = new File(stagedDirectory == null ? "" : stagedDirectory).getCanonicalFile();
+                File internal = getFilesDir().getCanonicalFile();
+                File external = getExternalFilesDir(null);
+                boolean allowed = dir.getPath().startsWith(internal.getPath() + File.separator);
+                if (external != null)
+                    allowed |= dir.getPath().startsWith(external.getCanonicalPath() + File.separator);
+                if (!allowed || !dir.getName().equals(".wired-gallery-batch") || !dir.isDirectory())
+                    throw new IOException("Invalid gallery batch directory");
+                File[] pngs = galleryBatchFiles(dir);
+                if (pngs.length < 1 || pngs.length > 4096)
+                    throw new IOException("Invalid image count for ZIP");
+                pendingAssetZip = dir;
+                Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+                intent.addCategory(Intent.CATEGORY_OPENABLE);
+                intent.setType("application/zip");
+                intent.putExtra(Intent.EXTRA_TITLE, "reLain-Archive-images.zip");
+                intent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+                startActivityForResult(intent, REQUEST_ASSET_ZIP);
+            } catch (Exception error) {
+                File failed = pendingAssetZip;
+                pendingAssetZip = null;
+                // A failed SAF launch must not leave a batch staged indefinitely.
+                if (failed != null) COPY_EXECUTOR.execute(() -> clearGalleryBatch(failed));
+                nativeOnAssetExportFinished("Could not open ZIP picker: " + error.getMessage());
+            }
+        });
+    }
+
+    private static File[] galleryBatchFiles(File staged) throws IOException {
+        File[] entries = staged.listFiles();
+        if (entries == null || entries.length < 1 || entries.length > 4096)
+            throw new IOException("Invalid gallery staging folder");
+        for (File entry : entries) {
+            if (!entry.isFile() || !entry.getName().matches("lain_[a-zA-Z0-9_-]{1,90}\\.png") ||
+                entry.length() < 1 || entry.length() > 64L * 1024 * 1024 ||
+                !entry.getCanonicalFile().getParentFile().equals(staged))
+                throw new IOException("Invalid staged PNG: " + entry.getName());
+        }
+        Arrays.sort(entries, Comparator.comparing(File::getName));
+        return entries;
+    }
+
+    private static void clearGalleryBatch(File directory) {
+        if (directory == null) return;
+        File[] entries = directory.listFiles();
+        if (entries != null) for (File entry : entries) {
+            if (entry.isFile() && entry.getName().startsWith("lain_") && entry.getName().endsWith(".png"))
+                entry.delete();
+        }
+        directory.delete();
+    }
+
+    private void saveGalleryZipToUri(File staged, Uri destination) {
+        String notice;
+        int count = 0;
+        long total = 0;
+        try {
+            File[] entries = galleryBatchFiles(staged);
+            OutputStream raw = getContentResolver().openOutputStream(destination, "w");
+            if (raw == null) throw new IOException("Document provider returned no output stream");
+            try (ZipOutputStream zip = new ZipOutputStream(new BufferedOutputStream(raw))) {
+                // PNG data is compressed already; avoid expensive recompression.
+                zip.setLevel(Deflater.NO_COMPRESSION);
+                byte[] buffer = new byte[64 * 1024];
+                for (File entry : entries) {
+                    zip.putNextEntry(new ZipEntry("frames/" + entry.getName()));
+                    try (InputStream input = new BufferedInputStream(new FileInputStream(entry))) {
+                        for (int n; (n = input.read(buffer)) != -1;) {
+                            total += n;
+                            if (total > 400L * 1024 * 1024)
+                                throw new IOException("ZIP exceeds 400 MiB safety limit");
+                            zip.write(buffer, 0, n);
+                        }
+                    }
+                    zip.closeEntry();
+                    ++count;
+                }
+                zip.finish();
+            }
+            notice = "Archive ZIP exported: " + count + " PNG frames.";
+        } catch (Exception error) {
+            notice = "Archive ZIP export failed: " + error.getMessage();
+            // Remove an incomplete document when the storage provider supports deletion.
+            try { DocumentsContract.deleteDocument(getContentResolver(), destination); }
+            catch (Exception ignored) { }
+        } finally {
+            clearGalleryBatch(staged);
+        }
+        final String result = notice;
+        runOnUiThread(() -> {
+            Toast.makeText(this, result, Toast.LENGTH_LONG).show();
+            nativeOnAssetExportFinished(result);
+        });
+    }
 
     /** Download the completed laingame.net English subtitle pack into the app's language folder. */
     public void downloadEnglishSubtitles(String dataDirectory) {
@@ -193,7 +385,32 @@ public final class LainActivity extends SDLActivity {
 
     /** Download and convert the community PT-BR WebVTT tracks into a native SRT pack. */
     public void downloadPortugueseSubtitles(String dataDirectory) {
-        COPY_EXECUTOR.execute(() -> downloadPortugueseSubtitlesWorker(dataDirectory));
+        downloadCommunitySubtitles(dataDirectory, "pt-BR");
+    }
+
+    /** The translation catalog is supplied by laingame-net/lainvtt. */
+    public void downloadCommunitySubtitles(String dataDirectory, String languageCode) {
+        if (languageCode == null || !languageCode.matches("de|en|es-ES|fr|pt-BR")) {
+            nativeOnSubtitlesDownloaded("", 0, "Unsupported translation code");
+            return;
+        }
+        final String code = languageCode;
+        COPY_EXECUTOR.execute(() -> downloadCommunitySubtitlesWorker(dataDirectory, code));
+    }
+
+    private static String communityLanguageName(String code) {
+        switch (code) {
+            case "de": return "Deutsch";
+            case "en": return "English (lainTSX)";
+            case "es-ES": return "Español";
+            case "fr": return "Français";
+            case "ja": return "Japanese (lainTSX subtitles)";
+            case "ko": return "Korean";
+            case "pt-BR": return "Português brasileiro";
+            case "ru": return "Russian";
+            case "zh-CN": return "Chinese (Simplified)";
+            default: return code;
+        }
     }
 
     private static long parseVttTimeMillis(String timestamp) throws IOException {
@@ -237,7 +454,7 @@ public final class LainActivity extends SDLActivity {
         return String.format(Locale.ROOT, "%02d:%02d:%02d,%03d", hours, minutes, seconds, millis);
     }
 
-    private static String convertPortugueseWebVtt(String source) throws IOException {
+    private static String convertCommunityWebVtt(String source) throws IOException {
         source = source.replace(String.valueOf((char)0xFEFF), "").replace("\r\n", "\n").replace('\r', '\n');
         String[] blocks = source.split("\\n[ \\t]*\\n");
         java.util.ArrayList<String> cues = new java.util.ArrayList<>();
@@ -284,7 +501,9 @@ public final class LainActivity extends SDLActivity {
         return srt.toString();
     }
 
-    private void downloadPortugueseSubtitlesWorker(String dataDirectory) {
+    private void downloadCommunitySubtitlesWorker(String dataDirectory, String languageCode) {
+        final String folderCode = languageCode.equals("ja") ? "ja-laintsx" : languageCode;
+        final String languageName = communityLanguageName(languageCode);
         File staging = null;
         HttpURLConnection connection = null;
         int subtitleCount = 0;
@@ -296,7 +515,7 @@ public final class LainActivity extends SDLActivity {
             if (!langRoot.exists() && !langRoot.mkdirs()) {
                 throw new IOException("Could not create the language folder");
             }
-            staging = new File(langRoot, ".pt-BR-download");
+            staging = new File(langRoot, ".lainvtt-" + folderCode + "-download");
             deleteRecursively(staging);
             File content = new File(staging, "content");
             File subtitles = new File(content, "subtitles");
@@ -313,7 +532,7 @@ public final class LainActivity extends SDLActivity {
             if (response < 200 || response >= 300) throw new IOException("GitHub returned HTTP " + response);
             int declaredLength = connection.getContentLength();
             if (declaredLength > 128L * 1024L * 1024L) {
-                throw new IOException("The PT-BR subtitle archive is unexpectedly large");
+                throw new IOException("The community subtitle archive is unexpectedly large");
             }
 
             long extractedBytes = 0;
@@ -326,10 +545,10 @@ public final class LainActivity extends SDLActivity {
                 while ((entry = zip.getNextEntry()) != null) {
                     String name = entry.getName().replace('\\', '/');
                     if (name.startsWith("/") || name.indexOf((char)0) >= 0) {
-                        throw new IOException("The PT-BR archive contains an unsafe path");
+                        throw new IOException("The community subtitle archive contains an unsafe path");
                     }
                     String[] parts = name.split("/");
-                    if (parts.length != 3 || !parts[1].equals("pt-BR") || entry.isDirectory()) {
+                    if (parts.length != 3 || !parts[1].equals(languageCode) || entry.isDirectory()) {
                         zip.closeEntry();
                         continue;
                     }
@@ -339,19 +558,19 @@ public final class LainActivity extends SDLActivity {
                         zip.closeEntry();
                         continue;
                     }
-                    if (++seenFiles > 5000) throw new IOException("The PT-BR pack contains too many files");
+                    if (++seenFiles > 5000) throw new IOException("The community subtitle pack contains too many files");
                     java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
                     int read;
                     while ((read = zip.read(buffer)) != -1) {
                         extractedBytes += read;
                         if (extractedBytes > 64L * 1024L * 1024L) {
-                            throw new IOException("The PT-BR subtitle files exceed the 64 MiB safety limit");
+                            throw new IOException("The community subtitle files exceed the 64 MiB safety limit");
                         }
                         bytes.write(buffer, 0, read);
                     }
                     String vtt = new String(bytes.toByteArray(), java.nio.charset.StandardCharsets.UTF_8);
                     if (vtt.startsWith(String.valueOf((char)0xFEFF))) vtt = vtt.substring(1);
-                    String srt = convertPortugueseWebVtt(vtt);
+                    String srt = convertCommunityWebVtt(vtt);
                     if (!srt.isEmpty()) {
                         String targetName = sourceName.substring(0, sourceName.length() - 4) + ".srt";
                         File output = new File(subtitles, targetName);
@@ -364,42 +583,43 @@ public final class LainActivity extends SDLActivity {
                     zip.closeEntry();
                 }
             }
-            if (subtitleCount == 0) throw new IOException("No valid PT-BR WebVTT subtitle tracks were found");
+            if (subtitleCount == 0) throw new IOException("No valid WebVTT tracks for " + languageCode);
             java.util.Collections.sort(indexNames);
             try (FileOutputStream out = new FileOutputStream(new File(subtitles, "index.txt"), false)) {
                 for (String item : indexNames) out.write((item + "\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
             }
             try (FileOutputStream out = new FileOutputStream(new File(content, "pack.txt"), false)) {
-                out.write(("name = Português brasileiro\n"
+                out.write(("name = " + languageName + "\n"
                         + "author = lainTSX WebVTT contributors\n"
-                        + "; source: https://github.com/laingame-net/lainvtt/tree/main/pt-BR\n")
+                        + "; source: https://github.com/laingame-net/lainvtt/tree/main/" + languageCode + "\n")
                         .getBytes(java.nio.charset.StandardCharsets.UTF_8));
             }
 
-            File destination = new File(langRoot, "pt-BR");
-            File backup = new File(langRoot, ".pt-BR-old");
+            File destination = new File(langRoot, folderCode);
+            File backup = new File(langRoot, "." + folderCode + "-old");
             deleteRecursively(backup);
             boolean hadOld = destination.exists();
             if (hadOld && !destination.renameTo(backup)) {
-                throw new IOException("Could not move the previous PT-BR subtitle pack");
+                throw new IOException("Could not back up previous subtitle pack");
             }
             if (!content.renameTo(destination)) {
                 if (hadOld) backup.renameTo(destination);
-                throw new IOException("Could not install the PT-BR subtitle pack");
+                throw new IOException("Could not install the selected subtitle pack");
             }
             deleteRecursively(backup);
             deleteRecursively(staging);
             staging = null;
             final int installed = subtitleCount;
-            final String message = "Instaladas " + installed + " faixas de legendas PT-BR. No jogo, selecione Português brasileiro em F1 > Settings > Text / subtitles.";
+            final String message = "Installed " + installed + " subtitle tracks for " + languageName
+                    + ". In game: F1 > Settings > Text / subtitles.";
             runOnUiThread(() -> {
-                nativeOnSubtitlesDownloaded("pt-BR", installed, message);
-                Toast.makeText(this, "Legendas PT-BR instaladas (" + installed + " faixas).", Toast.LENGTH_LONG).show();
+                nativeOnSubtitlesDownloaded(folderCode, installed, message);
+                Toast.makeText(this, "Subtitle pack installed: " + languageName + " (" + installed + ")", Toast.LENGTH_LONG).show();
             });
         } catch (Exception error) {
-            final String message = "Falha ao baixar legendas PT-BR: " + error.getMessage();
+            final String message = "Subtitle download failed (" + languageCode + "): " + error.getMessage();
             runOnUiThread(() -> {
-                nativeOnSubtitlesDownloaded("pt-BR", 0, message);
+                nativeOnSubtitlesDownloaded(folderCode, 0, message);
                 Toast.makeText(this, message, Toast.LENGTH_LONG).show();
             });
         } finally {
@@ -426,10 +646,163 @@ public final class LainActivity extends SDLActivity {
         });
     }
 
+    /** Queried by the launcher to prevent Play/removal while SAF is importing. */
+    public boolean isModImportBusy() {
+        return modImportBusy || pendingModsDirectory != null || pendingModZipsDirectory != null;
+    }
+
+    public String getModImportStatus() {
+        return modImportStatus;
+    }
+
+    /** Open one or several .zip mod archives (Android Storage Access Framework). */
+    public void openModZipPicker(String modsDirectory) {
+        pendingModZipsDirectory = modsDirectory;
+        runOnUiThread(() -> {
+            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            intent.addCategory(Intent.CATEGORY_OPENABLE);
+            intent.setType("*/*");
+            intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+            intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{
+                    "application/zip", "application/x-zip-compressed",
+                    "application/octet-stream"
+            });
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            try {
+                startActivityForResult(intent, REQUEST_MOD_ZIPS);
+            } catch (RuntimeException error) {
+                pendingModZipsDirectory = null;
+                nativeOnModFolderImported("", "Nao foi possivel abrir o seletor de ZIPs.");
+            }
+        });
+    }
+
+    /** Confirm executable content once per import batch, not once per mod. */
+    private boolean approveModCode(String folder, boolean lua, boolean plugin) throws IOException {
+        if (modCodeWarningAccepted) return true;
+        CountDownLatch selected = new CountDownLatch(1);
+        AtomicReference<Boolean> accepted = new AtomicReference<>(false);
+        runOnUiThread(() -> {
+            if (isFinishing() || isDestroyed()) { selected.countDown(); return; }
+            String kind = plugin ? "plugins nativos (.so)" : "scripts Lua";
+            new AlertDialog.Builder(this)
+                    .setTitle("Aviso de seguranca: mods")
+                    .setMessage("O mod \"" + folder + "\" contem " + kind +
+                            ". Esse codigo roda dentro do aplicativo e pode acessar arquivos do re:Lain. " +
+                            "Instale apenas pacotes de origem confiavel. Permitir os mods deste lote?")
+                    .setPositiveButton("Permitir", (dialog, which) -> {
+                        accepted.set(true);
+                        selected.countDown();
+                    })
+                    .setNegativeButton("Cancelar", (dialog, which) -> selected.countDown())
+                    .setOnCancelListener(dialog -> selected.countDown())
+                    .show();
+        });
+        try {
+            if (!selected.await(120, TimeUnit.SECONDS))
+                throw new IOException("Tempo esgotado aguardando autorizacao do mod");
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new IOException("Importacao interrompida", interrupted);
+        }
+        modCodeWarningAccepted = accepted.get();
+        return accepted.get();
+    }
+
+    private ModArchiveInstaller.Resolver modResolver() {
+        return new ModArchiveInstaller.Resolver() {
+            @Override
+            public ModArchiveInstaller.Decision onDuplicate(String name) throws IOException {
+                return resolveModConflict(name);
+            }
+
+            @Override
+            public boolean allowExecutable(String name, boolean lua, boolean plugin) throws IOException {
+                return approveModCode(name, lua, plugin);
+            }
+        };
+    }
+
+    private ModArchiveInstaller.Decision resolveModConflict(String folderName) throws IOException {
+        CountDownLatch selected = new CountDownLatch(1);
+        AtomicReference<ModArchiveInstaller.Decision> choice =
+                new AtomicReference<>(ModArchiveInstaller.Decision.CANCEL);
+        runOnUiThread(() -> {
+            if (isFinishing() || isDestroyed()) {
+                selected.countDown();
+                return;
+            }
+            new AlertDialog.Builder(this)
+                    .setTitle("Mod ja instalado: " + folderName)
+                    .setMessage("Substituir a copia privada pelo novo mod? " +
+                            "A pasta original fora do re:Lain sera preservada.")
+                    .setItems(new String[]{"Substituir", "Ignorar", "Cancelar importacao"},
+                            (dialog, which) -> {
+                                choice.set(which == 0 ? ModArchiveInstaller.Decision.REPLACE :
+                                        which == 1 ? ModArchiveInstaller.Decision.SKIP :
+                                                ModArchiveInstaller.Decision.CANCEL);
+                                selected.countDown();
+                            })
+                    .setOnCancelListener(dialog -> selected.countDown())
+                    .show();
+        });
+        try {
+            if (!selected.await(120, TimeUnit.SECONDS))
+                throw new IOException("Tempo esgotado aguardando resposta sobre mod duplicado");
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new IOException("Importacao interrompida", interrupted);
+        }
+        return choice.get();
+    }
+
+    private void finishModImport(ModArchiveInstaller.Report report, String error, String targetDirectory) {
+        final String path = report == null || report.installed.isEmpty() ? "" :
+                new File(targetDirectory, report.installed.get(0)).getAbsolutePath();
+        final String message = error != null ? "Falha na importacao: " + error :
+                report.describe() + (report.skipped.isEmpty() ? "" :
+                        " Ignorados: " + android.text.TextUtils.join(", ", report.skipped));
+        runOnUiThread(() -> {
+            nativeOnModFolderImported(path, message);
+            modImportBusy = false;
+            modImportStatus = "";
+            Toast.makeText(this, message, Toast.LENGTH_LONG).show();
+        });
+    }
+
+    private void importModZips(List<Uri> uris, String targetDirectory) {
+        ModArchiveInstaller.Report summary = new ModArchiveInstaller.Report();
+        String error = null;
+        try {
+            File modsRoot = ModArchiveInstaller.ensureModsRoot(new File(targetDirectory));
+            ModArchiveInstaller.recoverInterruptedImports(modsRoot);
+            for (Uri uri : uris) {
+                String name = queryDisplayName(uri);
+                if (!name.toLowerCase(Locale.ROOT).endsWith(".zip"))
+                    throw new IOException("Selecione apenas arquivos .zip: " + name);
+                modImportStatus = "Importando " + name + "...";
+                try (InputStream input = getContentResolver().openInputStream(uri)) {
+                    if (input == null) throw new IOException("Nao foi possivel abrir " + name);
+                    ModArchiveInstaller.Report result = ModArchiveInstaller.installZip(
+                            input, name, modsRoot, modResolver(),
+                            status -> modImportStatus = name + ": " + status);
+                    summary.installed.addAll(result.installed);
+                    summary.skipped.addAll(result.skipped);
+                    summary.files += result.files;
+                    summary.bytes += result.bytes;
+                }
+            }
+        } catch (Exception failed) {
+            error = failed.getMessage();
+        }
+        // Previous archives may have installed successfully: always refresh on completion.
+        finishModImport(summary, error, targetDirectory);
+    }
+
     /** Called from the native Mods tab; imports a directory selected by the user. */
     public void openModFolderPicker(String modsDirectory) {
+        pendingModsDirectory = modsDirectory;
         runOnUiThread(() -> {
-            pendingModsDirectory = modsDirectory;
             Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
             intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
                     | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
@@ -446,6 +819,58 @@ public final class LainActivity extends SDLActivity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQUEST_ASSET_ZIP) {
+            File staged = pendingAssetZip;
+            pendingAssetZip = null;
+            if (staged == null) {
+                nativeOnAssetExportFinished("No gallery ZIP was prepared.");
+            } else if (resultCode != Activity.RESULT_OK || data == null || data.getData() == null) {
+                COPY_EXECUTOR.execute(() -> {
+                    clearGalleryBatch(staged);
+                    runOnUiThread(() -> nativeOnAssetExportFinished("Archive ZIP export cancelled."));
+                });
+            } else {
+                final Uri outputUri = data.getData();
+                COPY_EXECUTOR.execute(() -> saveGalleryZipToUri(staged, outputUri));
+            }
+            return;
+        }
+        if (requestCode == REQUEST_ASSET_PNG) {
+            File staged = pendingAssetPng;
+            pendingAssetPng = null;
+            if (staged == null) {
+                nativeOnAssetExportFinished("No gallery file was prepared.");
+            } else if (resultCode != Activity.RESULT_OK || data == null || data.getData() == null) {
+                staged.delete();
+                nativeOnAssetExportFinished("PNG export cancelled.");
+            } else {
+                Uri outputUri = data.getData();
+                COPY_EXECUTOR.execute(() -> saveGalleryPngToUri(staged, outputUri));
+            }
+            return;
+        }
+        if (requestCode == REQUEST_MOD_ZIPS) {
+            final String directory = pendingModZipsDirectory;
+            pendingModZipsDirectory = null;
+            if (resultCode != Activity.RESULT_OK || data == null) {
+                nativeOnModFolderImported("", "Importacao de ZIP cancelada.");
+                return;
+            }
+            LinkedHashSet<Uri> chosen = new LinkedHashSet<>();
+            if (data.getData() != null) chosen.add(data.getData());
+            ClipData clips = data.getClipData();
+            if (clips != null) for (int i = 0; i < clips.getItemCount(); ++i)
+                if (clips.getItemAt(i).getUri() != null) chosen.add(clips.getItemAt(i).getUri());
+            if (directory == null || chosen.isEmpty() || chosen.size() > 16) {
+                nativeOnModFolderImported("", "Selecione de 1 a 16 arquivos ZIP validos.");
+                return;
+            }
+            modCodeWarningAccepted = false;
+            modImportBusy = true;
+            modImportStatus = "Preparando " + chosen.size() + " ZIP(s)...";
+            COPY_EXECUTOR.execute(() -> importModZips(new ArrayList<>(chosen), directory));
+            return;
+        }
         if (requestCode == REQUEST_MOD_FOLDER) {
             if (resultCode != Activity.RESULT_OK || data == null || data.getData() == null) {
                 pendingModsDirectory = null;
@@ -466,7 +891,10 @@ public final class LainActivity extends SDLActivity {
                 nativeOnModFolderImported("", "The app's mods directory is unavailable.");
                 return;
             }
-            Toast.makeText(this, "Importing mod folder into re:Lain...", Toast.LENGTH_SHORT).show();
+            modCodeWarningAccepted = false;
+            modImportBusy = true;
+            modImportStatus = "Copiando pasta do mod...";
+            Toast.makeText(this, "Importando pasta para o re:Lain...", Toast.LENGTH_SHORT).show();
             COPY_EXECUTOR.execute(() -> copyModFolderIntoPrivateStorage(treeUri, targetDirectory));
             return;
         }
@@ -708,6 +1136,7 @@ public final class LainActivity extends SDLActivity {
                 }
                 String name = safeModChildName(displayName);
                 File output = new File(outputDirectory, name);
+                if (output.exists()) throw new IOException("A pasta do mod tem nomes duplicados: " + name);
                 File canonicalParent = output.getCanonicalFile().getParentFile();
                 if (canonicalParent == null || !canonicalParent.equals(outputDirectory.getCanonicalFile())) {
                     throw new IOException("The mod contains a path outside its folder");
@@ -754,50 +1183,30 @@ public final class LainActivity extends SDLActivity {
     }
 
     private void copyModFolderIntoPrivateStorage(Uri treeUri, String targetDirectory) {
-        File destination = null;
+        File staging = null;
+        ModArchiveInstaller.Report report = null;
+        String error = null;
         try {
             String rootId = DocumentsContract.getTreeDocumentId(treeUri);
             ModDocument root = queryModDocument(treeUri, rootId);
-            if (!Document.MIME_TYPE_DIR.equals(root.mimeType)) {
-                throw new IOException("Choose a folder, not an individual file");
-            }
-            File modsRoot = new File(targetDirectory);
-            if (!modsRoot.exists() && !modsRoot.mkdirs()) {
-                throw new IOException("Could not create the app's mods folder");
-            }
-            modsRoot = modsRoot.getCanonicalFile();
-            String baseName = safeModFolderName(root.name);
-            String folderName = baseName;
-            destination = new File(modsRoot, folderName);
-            int suffix = 2;
-            while (destination.exists()) {
-                folderName = baseName + " (" + suffix++ + ")";
-                destination = new File(modsRoot, folderName);
-            }
-            if (!destination.getCanonicalFile().getParentFile().equals(modsRoot) || !destination.mkdirs()) {
-                throw new IOException("Could not create the imported mod folder");
-            }
-
+            if (!Document.MIME_TYPE_DIR.equals(root.mimeType))
+                throw new IOException("Escolha uma pasta, nao um arquivo");
+            File modsRoot = ModArchiveInstaller.ensureModsRoot(new File(targetDirectory));
+            ModArchiveInstaller.recoverInterruptedImports(modsRoot);
+            staging = new File(modsRoot, ".import-" + java.util.UUID.randomUUID());
+            File content = new File(staging, "content");
+            if (!content.mkdirs()) throw new IOException("Nao foi possivel criar pasta temporaria");
             ModCopyStats stats = new ModCopyStats();
-            copyModChildren(treeUri, rootId, destination, 0, stats);
-            if (stats.files == 0) throw new IOException("The selected mod folder is empty");
-
-            final String importedPath = destination.getAbsolutePath();
-            final String importedFolderName = folderName;
-            final String message = "Imported " + importedFolderName + " (" + stats.files + " files, "
-                    + (stats.bytes / (1024 * 1024)) + " MiB). It is enabled by default.";
-            runOnUiThread(() -> {
-                Toast.makeText(this, "Mod imported: " + importedFolderName, Toast.LENGTH_LONG).show();
-                nativeOnModFolderImported(importedPath, message);
-            });
-        } catch (Exception error) {
-            deleteRecursively(destination);
-            final String message = "Mod import failed: " + error.getMessage();
-            runOnUiThread(() -> {
-                Toast.makeText(this, message, Toast.LENGTH_LONG).show();
-                nativeOnModFolderImported("", message);
-            });
+            copyModChildren(treeUri, rootId, content, 0, stats);
+            if (stats.files == 0) throw new IOException("A pasta selecionada esta vazia");
+            report = ModArchiveInstaller.installFolder(content, root.name, modsRoot,
+                    modResolver(), stats.files, stats.bytes);
+        } catch (Exception failed) {
+            error = failed.getMessage();
+        } finally {
+            ModArchiveInstaller.deleteRecursively(staging);
         }
+        finishModImport(report, error, targetDirectory);
     }
 
 }

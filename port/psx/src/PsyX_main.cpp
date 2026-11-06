@@ -3,6 +3,9 @@
 #include "PsyX/PsyX_version.h"
 #include "PsyX/PsyX_globals.h"
 #include "PsyX/PsyX_public.h"
+#if defined(__ANDROID__)
+#include <android/log.h>
+#endif
 #include "PsyX/util/timer.h"
 
 #include "gpu/PsyX_GPU.h"
@@ -62,6 +65,7 @@ enum EPsxCounters
 };
 
 volatile int g_psxSysCounters[PsxCounter_Num];
+static int g_lain_lastSwapVbl; /* reset when a game session starts */
 
 SDL_Thread* g_intrThread = NULL;
 SDL_mutex* g_intrMutex = NULL;
@@ -226,18 +230,21 @@ static int PsyX_Sys_InitialiseCore()
 	Util_InitHPCTimer(&g_vblTimer);
 #else
 
-	g_intrThread = SDL_CreateThread(intrThreadMain, "psyX_intr", NULL);
-
-	if (NULL == g_intrThread)
-	{
-		eprinterr("SDL_CreateThread failed: %s\n", SDL_GetError());
+	/* The vblank worker locks this mutex immediately. Create it before the
+	 * thread, and reset the stop flag on each new game session. */
+	g_stopIntrThread = 0;
+	g_psxSysCounters[PsxCounter_VBLANK] = 0;
+	g_lain_lastSwapVbl = 0;
+	g_intrMutex = SDL_CreateMutex();
+	if (!g_intrMutex) {
+		eprinterr("SDL_CreateMutex failed: %s\n", SDL_GetError());
 		return 0;
 	}
-	
-	g_intrMutex = SDL_CreateMutex();
-	if (NULL == g_intrMutex)
-	{
-		eprinterr("SDL_CreateMutex failed: %s\n", SDL_GetError());
+	g_intrThread = SDL_CreateThread(intrThreadMain, "psyX_intr", NULL);
+	if (!g_intrThread) {
+		eprinterr("SDL_CreateThread failed: %s\n", SDL_GetError());
+		SDL_DestroyMutex(g_intrMutex);
+		g_intrMutex = NULL;
 		return 0;
 	}
 #endif
@@ -653,7 +660,9 @@ void PsyX_Initialise(char* appName, int width, int height, int fullscreen)
 	SDL_SetHint(SDL_HINT_EMSCRIPTEN_ASYNCIFY, "0");
 #endif
 	
-	if (SDL_Init(SDL_INIT_VIDEO) != 0)
+	/* Launcher already owns SDL video on Android; don't increment its init
+	 * reference count for each Play. */
+	if (!(SDL_WasInit(SDL_INIT_VIDEO) & SDL_INIT_VIDEO) && SDL_Init(SDL_INIT_VIDEO) != 0)
 	{
 		eprinterr("Failed to initialise SDL\n");
 		PsyX_Shutdown();
@@ -684,7 +693,11 @@ void PsyX_Initialise(char* appName, int width, int height, int fullscreen)
 	PsyX_Sys_InitialiseInput();
 
 	// set shutdown function (PSX apps usualy don't exit)
-	atexit(PsyX_Shutdown);
+	static bool shutdown_registered = false;
+	if (!shutdown_registered) {
+		atexit(PsyX_Shutdown);
+		shutdown_registered = true;
+	}
 
 	// disable cursor visibility
 	SDL_ShowCursor(0);
@@ -708,7 +721,7 @@ extern void PsyX_SetCursorRelative(int enable)
 void PsyX_Sys_DoDebugKeys(int nKey, char down); // forward decl
 void PsyX_Sys_DoDebugMouseMotion(int x, int y, int dx, int dy);
 
-void PsyX_Exit();
+extern "C" void PsyX_Exit();
 
 int g_activeKeyboardControllers = 0x1;
 int g_altKeyState = 0;
@@ -1048,8 +1061,6 @@ void PsyX_WaitForTimestep(int count)
 	// wait for vblank
 	if (!g_skipSwapInterval)
 	{	
-		static int swapLastVbl = 0;
-
 		int vbl;
 		do
 		{
@@ -1058,32 +1069,56 @@ void PsyX_WaitForTimestep(int count)
 #endif
 			vbl = PsyX_Sys_GetVBlankCount();
 		}
-		while (vbl - swapLastVbl < count);
+		while (vbl - g_lain_lastSwapVbl < count);
 
-		swapLastVbl = PsyX_Sys_GetVBlankCount();
+		g_lain_lastSwapVbl = PsyX_Sys_GetVBlankCount();
 	}
 }
 
-void PsyX_Exit()
-{
-	exit(0);
+extern "C" void PsyX_Exit() {
+#if defined(__ANDROID__)
+        __android_log_print(ANDROID_LOG_INFO, "lain-dbg", "PsyX_Exit: setting flag");
+        g_lain_quit_requested = 1;
+#else
+        exit(0);
+#endif
 }
+
+static void PsyX_StopInterruptThread()
+{
+	if (g_intrThread) {
+		g_stopIntrThread = 1;
+		int returnValue;
+		SDL_WaitThread(g_intrThread, &returnValue);
+		g_intrThread = NULL;
+	}
+	if (g_intrMutex) {
+		SDL_DestroyMutex(g_intrMutex);
+		g_intrMutex = NULL;
+	}
+	g_stopIntrThread = 0;
+}
+
+#if defined(__ANDROID__)
+extern "C" void PsyX_ShutdownForLauncher(void)
+{
+	if (!g_window) return;
+	/* The window and GL context belong to the launcher, not the session. */
+	PsyX_StopInterruptThread();
+	GR_Shutdown();
+	vsync_callback = NULL;
+	g_window = NULL;
+	UnInstallExceptionHandler();
+	PsyX_Log_Finalise();
+}
+#endif
 
 void PsyX_Shutdown()
 {
 	if (!g_window)
 		return;
 
-	// quit vblank thread
-	if (g_intrThread)
-	{
-		g_stopIntrThread = 1;
-
-		int returnValue;
-		SDL_WaitThread(g_intrThread, &returnValue);
-
-		SDL_DestroyMutex(g_intrMutex);
-	}
+    PsyX_StopInterruptThread();
 
 	SDL_DestroyWindow(g_window);
 	g_window = NULL;

@@ -27,6 +27,7 @@ static Uint64 s_until;
 static char s_sub[1024];
 static char s_font_path[1024];
 static ImFont *s_sub_font;
+static std::vector<std::pair<std::string, ImFont *>> s_loaded_fonts;
 static const float SUB_FONT_PX = 48.0f; /* rasterised size; scaled to the window */
 static bool s_font_dirty;
 
@@ -484,23 +485,29 @@ static bool overlay_init(void) {
 
 /* The subtitle font can change while playing (a pack chosen in the menu); ImGui
  * 1.92's dynamic atlas accepts new fonts at any time. */
+
 static void load_sub_font(void) {
-    /* Each font file is added to the atlas once, however often packs are switched. */
-    static std::vector<std::pair<std::string, ImFont *>> loaded;
+    /* Each font file is added to the atlas once. */
     s_font_dirty = false;
     s_sub_font = nullptr;
+
     if (!s_font_path[0]) {
         return;
     }
-    for (auto &f : loaded) {
+
+    for (auto &f : s_loaded_fonts) {
         if (f.first == s_font_path) {
             s_sub_font = f.second;
             return;
         }
     }
-    s_sub_font = ImGui::GetIO().Fonts->AddFontFromFileTTF(s_font_path, SUB_FONT_PX);
+
+    s_sub_font = ImGui::GetIO().Fonts->AddFontFromFileTTF(
+        s_font_path, SUB_FONT_PX
+    );
+
     if (s_sub_font) {
-        loaded.emplace_back(s_font_path, s_sub_font);
+        s_loaded_fonts.emplace_back(s_font_path, s_sub_font);
     }
 }
 
@@ -516,6 +523,40 @@ extern "C" void overlay_set_font(const char *ttf_path) {
 extern "C" void overlay_menu_init(Settings *settings, OverlayApplyFn apply) {
     s_settings = settings;
     s_apply = apply;
+}
+
+extern "C" void overlay_session_shutdown(void) {
+    /* The second session must not reuse pointers into the previous ImGui atlas
+     * or stale BackendRendererUserData. This was the crash on the second Play. */
+    if (s_ready && ImGui::GetCurrentContext()) {
+        ImGuiIO &io = ImGui::GetIO();
+        if (io.BackendRendererUserData) ImGui_ImplOpenGL3_Shutdown();
+        if (io.BackendPlatformUserData) ImGui_ImplSDL2_Shutdown();
+        ImGui::DestroyContext();
+    }
+    s_ready = false;
+    s_loaded_fonts.clear();
+    s_sub_font = nullptr;
+    s_font_dirty = true;
+    s_menu = false;
+    s_menu_focus = false;
+    s_rebind = -1;
+    s_keys_changed = false;
+    s_settings = nullptr;
+    s_apply = nullptr;
+    s_text[0] = 0;
+    s_sub[0] = 0;
+    s_font_path[0] = 0;
+    s_until = 0;
+    s_mouse_moved_at = 0;
+    s_text_packs.clear();
+    s_voice_packs.clear();
+#if defined(__ANDROID__)
+    clear_touch_controls();
+    s_touch_edit_layout = false;
+    s_layout_drag_active = false;
+    s_layout_drag_item = -1;
+#endif
 }
 
 extern "C" int overlay_menu_is_open(void) {
@@ -835,9 +876,15 @@ static void draw_menu(const ImGuiViewport *vp) {
     }
     note_focus("Resume");
     ImGui::SameLine();
+    #if defined(__ANDROID__)
+    if (ImGui::Button("Return to launcher")) {
+        apply |= OVERLAY_APPLY_QUIT;
+    }
+#else
     if (ImGui::Button("Quit game")) {
         apply |= OVERLAY_APPLY_QUIT;
     }
+#endif
     note_focus("Quit game");
     ImGui::SameLine();
     ImGui::TextDisabled("Esc / F1 to close");

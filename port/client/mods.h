@@ -55,6 +55,7 @@ struct ModInfo {
     std::vector<std::string> ignored;  /* files the mod system doesn't use */
     bool has_script = false;           /* main.lua */
     std::vector<std::string> scripts;  /* .lua files */
+    std::vector<std::string> script_errors; /* Lua syntax diagnostics (not executed) */
     std::vector<std::string> plugins;  /* plugins/ */
     std::vector<std::string> data;     /* data/ (game data changes) */
     int textures = 0;                  /* HD textures in textures/ */
@@ -86,5 +87,9 @@ const std::vector<ModActive> &mods_active();
 /* Creates mods/<folder>/ with a mod.ini template. Returns false (reason in err)
  * if the name is empty or taken. */
 bool mods_create(const std::string &name, std::string &folder, std::string &err);
+
+/* Removes a selected installed mod from the app data directory. Only direct,
+ * non-symlink, non-reserved mod directories can be removed. */
+bool mods_remove(const std::string &folder, std::string &err);
 
 #endif

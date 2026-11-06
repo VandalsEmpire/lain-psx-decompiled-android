@@ -469,6 +469,13 @@ void GR_Shutdown()
 	GR_DestroyTexture(g_rgLutTexture);
 	GR_DestroyTexture(g_fbTexture);
 	GR_DestroyTexture(g_offscreenRTTexture);
+	/* The next game session must recreate the screen target. Deleted GL
+	 * handles must never pass the "already initialized" check. */
+	g_screenFramebuffer = 0;
+	s_screenColor = 0;
+	s_screenDepth = 0;
+	s_screenW = 0;
+	s_screenH = 0;
 #endif
 }
 

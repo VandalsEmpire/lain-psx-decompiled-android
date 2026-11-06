@@ -45,10 +45,12 @@ struct Mod {
     std::vector<Handler> frame, draw, menu, quit;
     std::vector<std::string> log;
     std::vector<void *> plugins;       /* SDL_LoadObject handles */
+    std::vector<LainModAPI *> plugin_apis; /* free with the session */
     std::vector<LainModQuitFn> plugin_quit;
 };
 
 std::vector<std::unique_ptr<Mod>> g_mods;
+std::vector<std::string> g_runtime_errors;
 std::vector<std::vector<Handler>> g_lua_hooks;  /* per game function, in load order */
 std::vector<void *> g_typed_top;                /* per game function: top of the plugin chain */
 SDL_threadID g_main_thread;
@@ -64,6 +66,10 @@ std::map<std::string, int> g_sym_index;
 
 void mod_log(Mod *m, const char *text) {
     printf("[mod %s] %s\n", m ? m->name.c_str() : "?", text);
+    if (text && (strstr(text, "error") || strstr(text, "failed") || strstr(text, "can't load"))) {
+        const std::string entry = std::string(m ? m->name : "unknown mod") + ": " + text;
+        if (g_runtime_errors.size() < 100) g_runtime_errors.push_back(entry);
+    }
     if (m) {
         m->log.push_back(text);
         if (m->log.size() > 200) m->log.erase(m->log.begin());
@@ -711,13 +717,14 @@ void load_plugins(Mod &m) {
         api->toast = api_toast;
         api->frame = api_frame;
         g_api_mod[api] = &m;
+        m.plugin_apis.push_back(api);
+        m.plugins.push_back(h); /* even failed init can install callbacks */
         int r = init(api);
         if (r != 0) {
             mod_log(&m, (p.filename().u8string() + ": lain_mod_init failed").c_str());
             /* not unloaded: init may already have installed hooks or callbacks */
             continue;
         }
-        m.plugins.push_back(h);
         if (auto q = (LainModQuitFn)SDL_LoadFunction(h, "lain_mod_quit")) m.plugin_quit.push_back(q);
         mod_log(&m, (std::string("plugin ") + p.filename().u8string() + " loaded").c_str());
     }
@@ -765,6 +772,7 @@ extern "C" int modrt_hook(const char *name, void *replacement, void **next) {
 }
 
 extern "C" void modrt_start(const char *setting) {
+    g_runtime_errors.clear();
     init_tables();
     for (const ModInfo &info : mods_scan(setting)) {
         if (!info.enabled) continue;
@@ -826,4 +834,31 @@ extern "C" void modrt_quit(void) {
         run_handlers(m->quit);
         for (LainModQuitFn q : m->plugin_quit) q();
     }
+    /* All callbacks/hooks must go before unloading libraries and Lua states. */
+    g_plugin_frame.clear();
+    g_plugin_draw.clear();
+    g_commands.clear();
+    g_lua_hooks.clear();
+    g_typed_top.clear();
+    g_fn_index.clear();
+    g_sym_index.clear();
+    lain_game_dispatch_fn = nullptr;
+    for (auto &m : g_mods) {
+        if (m->L) { lua_close(m->L); m->L = nullptr; }
+        for (void *lib : m->plugins) SDL_UnloadObject(lib);
+        for (LainModAPI *api : m->plugin_apis) {
+            free((void *)api->mod_dir);
+            delete api;
+        }
+    }
+    g_api_mod.clear();
+    g_mods.clear();
+    g_drawing = false;
+    std::string path = std::string(settings_data_dir()) + "last_mod_errors.txt";
+    if (FILE *file = fopen(path.c_str(), "wb")) {
+        for (const std::string &line : g_runtime_errors)
+            fprintf(file, "%s\n", line.c_str());
+        fclose(file);
+    }
+    g_runtime_errors.clear();
 }

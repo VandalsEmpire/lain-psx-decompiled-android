@@ -9,6 +9,7 @@
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
 #endif
+#include <setjmp.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,6 +44,13 @@
 #include "psx_mem.h"
 #include "settings.h"
 #include "setup_ui.h"
+
+#if defined(__ANDROID__)
+#include <android/log.h>
+#define LAIN_DBG(...) __android_log_print(ANDROID_LOG_INFO, "lain-dbg", __VA_ARGS__)
+#else
+#define LAIN_DBG(...) do { fprintf(stderr, "lain-dbg: " __VA_ARGS__); fprintf(stderr, "\n"); } while (0)
+#endif
 
 /* `lain --import disc.cue [disc2.cue]`: import discs without the launcher window. */
 static int import_cli(int n, char **paths) {
@@ -101,6 +109,16 @@ static int selftest(void) {
  *   LAIN_FRAME_LOG=1           print a line every 60 frames
  *   LAIN_KEYS=F:KEY[:N],...    hold SDL key KEY (e.g. Return, C, V, Up) for N frames
  *                              (default 6) from frame F: scripted input for test runs */
+#if defined(__ANDROID__)
+/* Session loop (item 1.3): setjmp in boot_game(), longjmp from PsyX_Exit. */
+jmp_buf g_lain_quit_jmp;
+volatile int g_lain_quit_jmp_armed = 0;
+volatile int g_lain_quit_requested = 0;
+#endif
+
+/* Game session control (patch 0005, item 1.3) */
+extern void PsyX_Exit(void);
+
 static int frame_count;
 
 int lain_frame_count(void) {
@@ -606,6 +624,14 @@ static void log_lain_anim(void) {
 }
 
 static void on_end_scene(void) {
+#if defined(__ANDROID__)
+    if (g_lain_quit_requested) {
+        LAIN_DBG("on_end_scene: flag detected, longjmp");
+        g_lain_quit_requested = 0;
+        longjmp(g_lain_quit_jmp, 1);
+    }
+#endif
+
     frame_count++;
     modrt_frame();
     log_lain_anim();
@@ -786,9 +812,15 @@ static void apply_menu_change(int what) {
         apply_keyboard_mapping(s);
     }
     if (what & OVERLAY_APPLY_QUIT) {
+        LAIN_DBG("apply_menu_change: OVERLAY_APPLY_QUIT");
+
         settings_save(s);
+#if defined(__ANDROID__)
+        g_lain_quit_requested = 1;
+#else
         exit(0);
-    }
+#endif
+        }
 }
 
 /* Loads the EXE image into the arena, opens the game window and runs the game. */
@@ -872,10 +904,42 @@ static int boot_game(const Settings *initial, const char *disc1, const char *dis
         LainMcrd_SetCardPath(0, card);
     }
     debug_hooks_init();
+#if defined(__ANDROID__)
+    /* Session loop (item 1.3): lain_game_main() returns via longjmp when
+     * PsyX_Exit() is called (F1 > Return to launcher, or SDL_QUIT from system).
+     * Cleanup per-session state here; main() loops back to the launcher.
+     * atexit() is not used to avoid double-shutdown across sessions.
+     * PsyX_Shutdown() is not called either: the launcher's SDL window and GL
+     * context survive across sessions (patch 0004); PsyX_Initialise() resets
+     * GPU/audio state on the next boot_game(). */
+    g_lain_quit_jmp_armed = 1;
+    g_lain_quit_requested = 0;
+    LAIN_DBG("boot_game: setjmp setup");
+    if (setjmp(g_lain_quit_jmp) == 0) {
+        lain_game_main();
+    } else {
+        LAIN_DBG("boot_game: longjmp returned");
+    }
+    g_lain_quit_jmp_armed = 0;
+    g_lain_quit_requested = 0;
+    LAIN_DBG("boot_game: about to cleanup");
+    printf("[lain] game session ended, returning to launcher\n");
+    fflush(stdout);
+    modrt_quit();
+    overlay_session_shutdown();
+    hdtex_stop();
+
+    /* Stop audio when returning to the launcher. */
+    LainSpu_SetOutputGain(0.0f);
+
+    PsyX_ShutdownForLauncher();
+    LainCD_Shutdown();
+    SpuQuit();
+#else
     atexit(modrt_quit);
-    /* Stop the CD drive thread before the process tears down (it runs game callbacks). */
     atexit(LainCD_Shutdown);
     lain_game_main(); /* never returns */
+#endif
     return 0;
 }
 
@@ -942,6 +1006,33 @@ int main(int argc, char **argv) {
     int play = argc >= 2 && strcmp(argv[1], "--play") == 0;
 
     /* The launcher is also where discs get imported. */
+#if defined(__ANDROID__)
+    /* Session loop (item 1.3): launcher <-> game <-> launcher <-> ...
+     * boot_game() returns only when user chooses Return to launcher from
+     * the in-game menu, or the system sends SDL_QUIT.
+     * Exit on the launcher ends the loop. */
+    if (!play) {
+        for (;;) {
+            LAIN_DBG("session loop: iteration start");
+            settings_load(&settings);
+            LAIN_DBG("session loop: calling setup_ui_run");
+            int ui_result = setup_ui_run(&settings);
+            LAIN_DBG("session loop: setup_ui_run returned %d", ui_result);
+            if (!ui_result) { SDL_Quit(); return 0; }
+            char d1[1024], d2[1024];
+            int h1 = discs_imported(settings_data_dir(), DISC_1, d1, sizeof d1);
+            int h2 = discs_imported(settings_data_dir(), DISC_2, d2, sizeof d2);
+            printf("data dir: %s\ndisc 1: %s\ndisc 2: %s\n", settings_data_dir(),
+                   h1 ? d1 : "(missing)", h2 ? d2 : "(missing)");
+            if (!h1) { fprintf(stderr, "lain: import disc 1 first\n"); continue; }
+            if (g_lain_launcher_window) {
+                PsyX_SetReusedGLContext(g_lain_launcher_window, g_lain_launcher_context);
+            }
+            boot_game(&settings, d1, h2 ? d2 : NULL);
+        }
+    }
+#endif
+
     if (!play && !setup_ui_run(&settings)) {
         SDL_Quit();
         return 0;

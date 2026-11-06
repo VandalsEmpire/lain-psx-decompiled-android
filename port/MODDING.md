@@ -447,3 +447,23 @@ program. Install them only from people you trust.
 Code: `client/mods.cpp` (files), `client/moddata.cpp` (game data), `client/modrt.cpp`
 (scripts and plugins), `client/hdtex.cpp` (texture packs), `client/mods_ui.cpp` (the tab), `client/napk.c`, `client/tim.c`,
 `client/png.c`, `client/json.cpp`.
+
+
+## Android mod management (stability update)
+
+The Android launcher can import a single folder, one ZIP, multiple ZIP files,
+or a ZIP containing several mod folders. ZIP extraction stays within an
+app-private temporary directory and the resulting mod is moved into place only
+after validation; archive paths with `..`, absolute paths, duplicate paths,
+excessive depth or extraction size are rejected.
+
+Existing mod folders are detected by folder name. If the name is already
+installed, Android asks whether to replace, skip or cancel; it never creates a
+second folder named `(2)` automatically. You can disable a mod without deleting
+it, or select **Remove mod** and confirm permanent deletion of the *imported*
+copy. The original ZIP or SAF folder is never changed.
+
+The launcher runs a syntax-only Lua check while validating mods; this is not a
+sandbox or proof that a script is safe. Runtime errors are available in the last
+session diagnostics. Lua and `.so` plugins execute inside the app process; only
+use mods from trusted sources. Android native plugins must target arm64-v8a.
