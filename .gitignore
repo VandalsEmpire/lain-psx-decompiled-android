@@ -39,3 +39,10 @@ android/keystore.properties
 android/*.jks
 android/*.keystore
 android/*.p12
+
+# Local source backups
+*.bak
+*.bak[0-9]*
+
+# Android APKs are distributed through Releases
+*.apk

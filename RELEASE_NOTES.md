@@ -1,45 +1,33 @@
-# re:Lain Android v0.1.0
+# re:Lain Android v0.2.0 — Wired Workstation
 
-The first public Android release of re:Lain, a native Android port of the Serial Experiments Lain PlayStation decompilation and client.
+Second public Android release of re:Lain.
 
-## Features
+## What's new
 
-- Native Android client for ARM64 devices.
-- OpenGL ES 3.0 rendering.
-- Configurable PlayStation-style touchscreen controls.
-- Physical gamepad support.
-- Import of personal PlayStation disc images.
-- Mod importing and management.
-- Unused-content gallery.
-- Optional English and Portuguese (Brazil) fan subtitle downloads.
+- Redesigned Wired Workstation launcher
+- Improved session stability and return-to-launcher behavior
+- Fixed game audio continuing after returning to launcher
+- Improved mod installation and management
+- Archive with individual PNG and batch ZIP image export
+- Animation-frame export
+- Community subtitles in Portuguese, English, Spanish,
+  French and German
+- Subtitle download, installation and selection in launcher
+- Additional usability and interface improvements
 
 ## Requirements
 
-- Android 6.0 (API 23) or newer.
-- ARM64 device (arm64-v8a).
-- OpenGL ES 3.0 support.
+- Android 6.0+
+- ARM64 device
+- OpenGL ES 3.0
+- Personal dumps of the original PlayStation discs
 
-## Installation
+## Notes
 
-1. Download re-Lain-android-v0.1.0.apk.
-2. Install the APK on your Android device.
-3. Import your own raw Disc 1 BIN/IMG data track through the Discs tab.
-4. Import Disc 2 when needed and press Play.
+The game uses raw 2352-byte BIN/IMG disc data tracks.
+No game data is included in this release.
 
-The importer accepts raw 2352-byte BIN/IMG data tracks. CHD and 2048-byte ISO images are not supported.
+Non-Latin subtitle support remains planned for a future release.
 
-## Known limitations
-
-- ARM64 only.
-- Landscape orientation only.
-- The launcher interface is currently in English.
-- 60 fps frame interpolation is disabled due to rendering artifacts on some devices.
-- Compatibility across all Android devices has not yet been established.
-
-## Important
-
-This release does not include copyrighted game data. You must provide your own original PlayStation disc dumps.
-
-The Android port builds upon the original [Serial Experiments Lain PSX decompilation](https://github.com/Y0oshi/lain-psx-decompiled).
-
-This project is not affiliated with or endorsed by the rights holders of Serial Experiments Lain.
+The Android port is based on the original decompilation by Y0oshi.
+The project is not affiliated with the game's rights holders.

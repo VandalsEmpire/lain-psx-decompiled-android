@@ -69,6 +69,14 @@ std::vector<PackOption> find_packs(const char *kind, const char *original_label)
     std::vector<PackOption> out = {{"ja", original_label}};
     std::string base = std::string(settings_data_dir()) + kind;
     for (const std::string &code : list_subdirs(base)) {
+#ifdef __ANDROID__
+        // re:Lain Latin subtitle scope v0.1.6.1, text packs only.
+        if (std::string(kind) == "lang" &&
+            code != "pt-BR" && code != "en" && code != "en-laingame" &&
+            code != "es-ES" && code != "fr" && code != "de") {
+            continue;
+        }
+#endif
         if (code != "ja") {
             out.push_back({code, pack_label(base + "/" + code, code)});
         }

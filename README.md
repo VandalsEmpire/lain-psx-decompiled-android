@@ -35,43 +35,52 @@ executable is identical.
 
 ## Android (re:Lain)
 
-This fork adds **re:Lain for Android**, a native Android port of the Serial Experiments Lain PlayStation decompilation and client.
+This fork includes **re:Lain Android**, a native Android client
+for *Serial Experiments Lain* (PlayStation).
 
-**[Download the latest Android APK](https://github.com/VandalsEmpire/lain-psx-decompiled-android/releases/latest)** · [Android documentation](android/README.md)
+**[Download Android releases](https://github.com/VandalsEmpire/lain-psx-decompiled-android/releases/latest)** |
+[Android documentation](android/README.md)
 
 ### Requirements
 
-- Android 6.0 (API 23) or newer.
-- 64-bit ARM device (arm64-v8a).
-- OpenGL ES 3.0 support.
-- Landscape orientation.
+- Android 6.0+ (API 23)
+- ARM64 device (`arm64-v8a`)
+- OpenGL ES 3.0
+- Your own dumps of the original PlayStation discs
+
+### Features in v0.2.0
+
+- Wired Workstation launcher, inspired by classic Unix desktops
+- Improved launcher/game session handling
+- Play → Launcher → Play without restarting the application
+- Touchscreen controls and physical gamepad support
+- Mod importing and management
+- Archive with unused images, animations and audio
+- Individual PNG export and batch ZIP export
+- Community subtitles: PT-BR, English, Spanish, French and German
+- Subtitle download and selection directly from the launcher
+- Original Japanese audio and game content
 
 ### Getting started
 
-1. Obtain your own dumps of both original PlayStation discs.
-2. Download and install the APK from the Releases page above.
-3. Open re:Lain and import the raw Disc 1 `.bin` or `.img` data track in the Discs tab.
-4. Import Disc 2 when needed and press Play.
-5. Tap MENU during gameplay to open the in-game menu.
+1. Install the APK from GitHub Releases.
+2. Import your own Disc 1 raw BIN/IMG data track.
+3. Import Disc 2 when needed.
+4. Choose optional subtitles in the launcher.
+5. Press **Play**.
 
-The Android importer accepts raw 2352-byte BIN/IMG data tracks. CHD and 2048-byte ISO images are not supported.
+The importer accepts raw 2352-byte-per-sector BIN/IMG
+data tracks. CHD and 2048-byte ISO files are not supported.
 
-### Android features
+### Limitations
 
-- Configurable PlayStation-style touchscreen controls.
-- Physical gamepad support.
-- Mod importing and management.
-- Unused-content gallery using your own disc images.
-- Optional English and Portuguese (Brazil) fan subtitle downloads.
+- ARM64 only
+- Landscape orientation
+- Unicode subtitle support for non-Latin scripts is deferred
+- Compatibility varies by Android device
 
-### Current limitations
-
-- First device release supports arm64-v8a only.
-- Launcher interface is currently in English.
-- Landscape orientation only.
-- 60 fps frame interpolation is disabled because it caused rendering artifacts on some devices.
-
-No copyrighted game data is included. You must provide your own original disc dumps.
+**No copyrighted game data is included.** The client reads
+the player's own imported disc images.
 
 ## Desktop clients
 

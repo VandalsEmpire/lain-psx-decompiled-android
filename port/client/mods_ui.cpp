@@ -556,3 +556,26 @@ void mods_tab_draw(Settings *s) {
     }
     ImGui::EndChild();
 }
+
+/* The tab is the source of truth after any enable/remove/import action.
+ * Before first opening the tab, scan once (not once per rendered frame).
+ * No background filesystem access, no mutating Settings and no fake "loaded" count. */
+ModsUiCounts mods_ui_counts(const Settings *s) {
+    ModsUiCounts counts;
+    if (!s) return counts;
+    static bool initial_scanned = false;
+    static std::vector<ModInfo> initial_mods;
+    const std::vector<ModInfo> *list = nullptr;
+    if (g_tab.loaded) {
+        list = &g_tab.mods;
+    } else {
+        if (!initial_scanned) {
+            initial_mods = mods_scan(s->mods);
+            initial_scanned = true;
+        }
+        list = &initial_mods;
+    }
+    counts.installed = (int)list->size();
+    for (const ModInfo &mod : *list) if (mod.enabled) ++counts.enabled;
+    return counts;
+}
